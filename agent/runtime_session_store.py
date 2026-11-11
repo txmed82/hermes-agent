@@ -330,13 +330,24 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
             self.journal = candidate
             return self.retry_pending()[0]
 
+    def _persist_entry(self, entry):
+        """Recover one delayed acknowledgement by replaying the identical receipt.
+
+        The owner's sequence/digest fence prevents duplicate effects; WorkerRPC
+        drops a timed-out link so this one retry uses a fresh connection.
+        """
+        try:
+            return self.rpc('worker.persist', **self.scope, **entry)
+        except TimeoutError:
+            return self.rpc('worker.persist', **self.scope, **entry)
+
     def retry_pending(self):
         with self.lock:
             results = []
             try:
                 while self.journal['pending']:
                     entry = self.journal['pending'][0]
-                    result = self.rpc('worker.persist', **self.scope, **entry)
+                    result = self._persist_entry(entry)
                     candidate = dict(self.journal, pending=self.journal['pending'][1:])
                     candidate = self._compression_receipt_journal(candidate, result)
                     self._save(candidate)
