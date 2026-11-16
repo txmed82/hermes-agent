@@ -268,6 +268,10 @@ _LAUNCHCTL_LIFECYCLE_VERBS_RE = re.compile(
     r"(?i)\blaunchctl\s+(?:kickstart|unload|load|stop|restart|bootout|kill|disable|remove)\b"
 )
 _HERMES_GATEWAY_LABEL_RE = re.compile(r"(?i)\bhermes[.\-]?gateway\b")
+# Non-Hermes LaunchAgents Colin authorized agents to re-bootstrap (exact absolute plist paths).
+_ALLOWED_BOOTSTRAP_PLISTS = frozenset({
+    "/Users/colin/Library/LaunchAgents/sh.executor.daemon.plist",
+})
 
 _SHELL_EXECUTABLES = frozenset({"sh", "bash", "dash", "ksh", "zsh"})
 _SHELL_OPTIONS_WITH_VALUES = frozenset({"-O", "+O", "-o", "+o"})
@@ -714,6 +718,11 @@ def contains_launchctl_submit_command(command: str) -> bool:
         if index is not None and _executable_name(segment[index]) == "launchctl":
             arguments = segment[index + 1 :]
             if arguments and arguments[0].lower() in {"submit", "bootstrap"}:
+                # Colin-authorized (2026-11-16): reloading the shared Executor daemon from its own
+                # existing plist is not a Hermes gateway job. Exact literal path only; no variables.
+                if (arguments[0].lower() == "bootstrap" and len(arguments) == 3
+                        and arguments[2] in _ALLOWED_BOOTSTRAP_PLISTS):
+                    continue
                 return True
     return False
 
