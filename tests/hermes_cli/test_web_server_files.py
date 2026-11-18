@@ -193,7 +193,17 @@ def test_download_resolves_paths_in_the_originating_profile_session(
         data = (base64.b64decode(response.json()["dataUrl"].split(",", 1)[1])
                 if route.endswith("read-data-url") else response.content)
         assert data == artifact.read_bytes()
-    for profile, session_id in (("other", "origin-session"), ("missing", "origin-session"),
+    # A download names its session's owner even when the request carried another existing
+    # profile (Desktop cards before the renderer owner fix); a preview keeps the strict rule.
+    foreign = client.get(route, params={
+        "path": str(artifact), "profile": "other", "session_id": "origin-session",
+    })
+    if route == "/api/fs/download":
+        assert foreign.status_code == 200, foreign.text
+        assert foreign.content == artifact.read_bytes()
+    else:
+        assert foreign.status_code == 404, foreign.text
+    for profile, session_id in (("missing", "origin-session"),
                                 ("default", "missing-session"), ("default", "")):
         response = client.get(route, params={
             "path": str(artifact), "profile": profile, "session_id": session_id,
