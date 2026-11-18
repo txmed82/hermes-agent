@@ -8,6 +8,7 @@ profile. It never guesses between owners and never widens a profile-bound native
 """
 
 import asyncio
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -42,10 +43,11 @@ def owners(monkeypatch, tmp_path):
     from hermes_cli import profiles
 
     default_home = tmp_path / "default-home"
-    for home in (default_home, default_home / "profiles" / "seldinger", default_home / "profiles" / "work"):
+    homes = {"default": default_home, "seldinger": default_home / "profiles" / "seldinger",
+             "work": default_home / "profiles" / "work"}
+    for home in homes.values():
         home.mkdir(parents=True, exist_ok=True)
         (home / "config.yaml").write_text("terminal:\n  backend: local\n", encoding="utf-8")
-        (home / "state.db").touch()  # Every profile here has a session store.
     monkeypatch.setattr(profiles, "_get_default_hermes_home", lambda: default_home)
     monkeypatch.setenv("HERMES_HOME", str(default_home))
     monkeypatch.setenv("TERMINAL_ENV", "local")
@@ -55,6 +57,12 @@ def owners(monkeypatch, tmp_path):
         "shared-id": {"seldinger", "work"},
         "default-chat": {"default"},
     }
+    for name, home in homes.items():  # Each profile's own session store, by exact id.
+        with sqlite3.connect(home / "state.db") as conn:
+            conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY)")
+            conn.executemany("INSERT INTO sessions (id) VALUES (?)",
+                             [(sid,) for sid, owned in rows.items() if name in owned])
+        conn.close()
     lookups = []
 
     async def detail(session_id, profile=None):
@@ -120,44 +128,26 @@ def test_a_profile_bound_native_grant_never_resolves_another_owner(owners):
     assert ("bot-chat", "seldinger") not in owners["lookups"]
 
 
-def test_a_profile_without_a_session_store_is_not_a_candidate(client, owners, monkeypatch, tmp_path):
-    from hermes_cli.web_routers import sessions
-
+def test_a_profile_without_a_session_store_is_not_a_candidate(client, owners, tmp_path):
     (tmp_path / "default-home" / "profiles" / "work" / "state.db").unlink()
-    real = sessions.get_session_detail
-    probed = []
-
-    async def detail(session_id, profile=None):
-        probed.append(profile)
-        return await real(session_id, profile)
-
-    monkeypatch.setattr("hermes_cli.web_routers.sessions.get_session_detail", detail)
     params = {"path": str(owners["report"]), "session_id": "bot-chat", "profile": "default"}
 
     response = client.get("/api/fs/download", params=params)
 
     assert response.status_code == 200, response.text
-    assert "work" not in probed
+    assert owners["lookups"] == [("bot-chat", "default"), ("bot-chat", "seldinger")]
 
 
-def test_a_store_that_cannot_answer_fails_closed(client, owners, monkeypatch, caplog):
-    from hermes_cli.web_routers import sessions
-
-    real = sessions.get_session_detail
-
-    async def detail(session_id, profile=None):
-        if profile == "work":
-            raise HTTPException(status_code=503, detail="Session store is corrupt")
-        return await real(session_id, profile)
-
-    monkeypatch.setattr("hermes_cli.web_routers.sessions.get_session_detail", detail)
+def test_a_store_that_cannot_answer_fails_closed(client, owners, caplog, tmp_path):
+    (tmp_path / "default-home" / "profiles" / "work" / "state.db").write_bytes(b"not a database" * 512)
     params = {"path": str(owners["report"]), "session_id": "bot-chat", "profile": "default"}
 
     response = client.get("/api/fs/download", params=params)
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Session not found"
-    assert "owner search stopped; profile 'work' store answered 503" in caplog.text
+    assert "owner search stopped; profile 'work' store failed: DatabaseError" in caplog.text
+    assert ("bot-chat", "seldinger") not in owners["lookups"]
 
 
 def test_an_unknown_profile_name_is_not_reinterpreted(client, owners):
@@ -167,3 +157,13 @@ def test_an_unknown_profile_name_is_not_reinterpreted(client, owners):
 
     assert response.status_code == 404
     assert ("bot-chat", "seldinger") not in owners["lookups"]
+
+
+def test_the_search_never_opens_a_store_through_the_browse_path(client, owners):
+    params = {"path": str(owners["report"]), "session_id": "bot-chat", "profile": "work"}
+
+    response = client.get("/api/fs/download", params=params)
+
+    assert response.status_code == 200, response.text
+    # Only the requested profile and the one owner go through the session-detail read.
+    assert owners["lookups"] == [("bot-chat", "work"), ("bot-chat", "seldinger")]

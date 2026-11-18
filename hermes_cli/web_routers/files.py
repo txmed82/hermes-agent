@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -1193,8 +1194,9 @@ async def _fs_download_session(
     another profile's chat answered "Session not found". This grants no access the principal lacks,
     because it may already name any profile on this server. A profile-bound native grant is never
     widened, an unknown profile name is not reinterpreted, and a missing, blank or ambiguous id
-    still 404s. A profile with no session store is skipped; any other store that cannot answer
-    fails the request closed rather than letting a partial search choose the owner. Previews and saves keep the strict
+    still 404s. The search is a read-only existence query per store. A profile with no session
+    store is skipped; any other store that cannot answer fails the request closed rather than
+    letting a partial search choose the owner. Previews and saves keep the strict
     :func:`_fs_owned_session` rule."""
     try:
         return await _fs_owned_session(session_id, profile), profile
@@ -1206,30 +1208,40 @@ async def _fs_download_session(
         from hermes_cli.profiles import list_profile_names
         from hermes_cli.web_server_sessions import _session_db_path_for_profile
 
-        def candidates():
-            # A profile without a session store cannot own the id. Any other store must answer.
-            names = []
+        def owners_of() -> list[str]:
+            # A read-only, query-only existence check: never the browse path, which may migrate a
+            # drifted store. A profile with no store cannot own the id; a store that cannot
+            # answer stops the search, because a partial search could choose the wrong owner.
+            found = []
             for name in list_profile_names():
+                if name == profile:
+                    continue  # Already answered above.
                 try:
-                    if _session_db_path_for_profile(name).exists():
-                        names.append(name)
+                    db_path = _session_db_path_for_profile(name)
                 except HTTPException:
                     continue
-            return names
-
-        owners = []
-        for name in await asyncio.to_thread(candidates):
-            try:
-                row = await _fs_owned_session(session_id, name)
-            except HTTPException as miss:
-                if miss.status_code == 404:
+                if not db_path.exists():
                     continue
-                # An unreadable store might hold the id: picking another owner could be a guess.
-                logger.warning("fs download: owner search stopped; profile %r store answered %s",
-                               name, miss.status_code)
-                raise HTTPException(status_code=404, detail="Session not found") from miss
+                try:
+                    with contextlib.closing(sqlite3.connect(
+                            f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)) as conn:
+                        conn.execute("PRAGMA query_only = ON")
+                        hit = conn.execute(
+                            "SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (session_id,)).fetchone()
+                except sqlite3.Error as error:
+                    logger.warning("fs download: owner search stopped; profile %r store failed: %s",
+                                   name, type(error).__name__)
+                    raise HTTPException(status_code=404, detail="Session not found") from error
+                if hit:
+                    found.append(name)
+            return found
+
+        names = await asyncio.to_thread(owners_of)
+        owners = []
+        if len(names) == 1:
+            row = await _fs_owned_session(session_id, names[0])
             if isinstance(row, dict) and row.get("id") == session_id:
-                owners.append((row, name))
+                owners.append((row, names[0]))
         if len(owners) != 1:
             raise HTTPException(status_code=404, detail="Session not found") from exc
         logger.info("fs download: session resolved to its owning profile %r (requested %r)",
