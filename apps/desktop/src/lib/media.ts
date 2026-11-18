@@ -452,7 +452,20 @@ export async function downloadGatewayMediaFile(
   }
 
   const conn = $connection.get()
-  const owner = origin.owner ?? { connectionId: conn?.connectionId, profile: origin.profile ?? conn?.profile }
+  // A Bot Chat can belong to another profile on the same launch socket. Never
+  // pair its durable id with the focused profile, or retry a scoped save without it.
+  const idToResolve = origin.owner ? undefined : origin.sessionId
+  const session = idToResolve ? sessionFileOwnerScope(idToResolve) : null
+
+  // Older artifact records can supply an explicit profile before the owner cache is warm.
+  // Preserve that scoped request and its session ID; never retry it on another profile.
+  if (idToResolve && !session && !origin.profile?.trim()) {
+    throw new Error('Could not resolve the session owner for this download')
+  }
+
+  const owner = origin.owner ?? (session
+    ? { connectionId: session.connectionId ?? capabilityScoped().connectionId, profile: session.profile }
+    : { connectionId: conn?.connectionId, profile: origin.profile ?? conn?.profile })
 
   return window.hermesDesktop.saveGatewayFile({
     ...(owner.connectionId ? { connectionId: owner.connectionId } : {}),
