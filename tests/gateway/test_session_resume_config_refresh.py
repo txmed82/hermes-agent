@@ -219,9 +219,9 @@ async def test_resume_never_changes_a_running_turns_policy(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('legacy_adoption', [False, True], ids=['following-main', 'deferred-legacy-adoption'])
+@pytest.mark.parametrize('case', ['following-main', 'deferred-legacy-adoption', 'committed-legacy-adoption'])
 async def test_busy_main_chat_gains_graphical_tools_on_the_same_attachment_after_idle(
-    tmp_path, monkeypatch, legacy_adoption,
+    tmp_path, monkeypatch, case,
 ):
     from typing import cast
     import hermes_state_runtime as rt
@@ -248,6 +248,7 @@ async def test_busy_main_chat_gains_graphical_tools_on_the_same_attachment_after
     terminal_viewer = AuthorityConnection(authority, object(), {'user_id': 'human'})
     viewer = AuthorityConnection(authority, object(), {'user_id': 'human', 'dashboard_chat_renderer': True})
     try:
+        legacy_adoption = case != 'following-main'
         main_flags = {} if legacy_adoption else {'title': 'Bot Chat', 'follow_profile_config': True}
         sid = (await _call(owner, 'session.create', request_id='old-main-busy', source='cli', cwd=str(tmp_path),
                            **main_flags))['session_id']
@@ -258,7 +259,8 @@ async def test_busy_main_chat_gains_graphical_tools_on_the_same_attachment_after
         turn = await authority.submit(owner.actor, Submission('turn-1', SessionRef(authority.profile_id, sid),
                                                                {'text': 'one'}, 'queue'))
         await asyncio.wait_for(started.wait(), 10)
-        await _call(terminal_viewer if legacy_adoption else viewer, 'session.resume', session_id=sid)
+        if case != 'committed-legacy-adoption':
+            await _call(terminal_viewer if legacy_adoption else viewer, 'session.resume', session_id=sid)
         assert sid in viewer.subscriptions
         old = _policy(authority, sid)
         assert old is not None and old.platform == 'cli'
@@ -266,6 +268,10 @@ async def test_busy_main_chat_gains_graphical_tools_on_the_same_attachment_after
         release.set()
         await async_wait_until(lambda: (rt.get_session_admission(db, admission_id=turn.admission_id) or {}).get('status')
                                == 'terminal', what='busy Main Chat turn to settle')
+        if case == 'committed-legacy-adoption':
+            await _call(terminal_viewer, 'session.resume', session_id=sid)
+            adopted = _policy(authority, sid)
+            assert adopted is not None and adopted.follows_profile and adopted.platform == 'cli'
         if not legacy_adoption:
             await _call(owner, 'session.resume', session_id=sid)
             still_cli = _policy(authority, sid)

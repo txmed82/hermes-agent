@@ -249,7 +249,8 @@ async def _commit_refresh(authority, ref, mcp_only, adopt_only=False, graphical=
         pending_graphical.discard(ref.session_id)
         return False
     stored, old, policy, secrets, replaced, generation = prepared
-    if policy.follows_profile and not old.follows_profile:
+    adopting = policy.follows_profile and not old.follows_profile
+    if adopting:
         pending.add(ref.session_id)  # until this commit lands
     if old.source in {'cli', 'tui'} and policy.source == 'gui':
         pending_graphical.add(ref.session_id)
@@ -264,6 +265,11 @@ async def _commit_refresh(authority, ref, mcp_only, adopt_only=False, graphical=
                         then=lambda _generation: _publish(authority, ref, moved))
     pending.discard(ref.session_id)
     pending_graphical.discard(ref.session_id)
+    if adopting and not graphical and not mcp_only and policy.source in {'cli', 'tui'}:
+        # This terminal adoption can clear the ordinary pending marker before an
+        # already-attached Desktop viewer reopens. Leave the surface retry for
+        # that graphical open; terminal refreshes must not consume it.
+        _pending_graphical_adoptions(authority).add(ref.session_id)
     return True
 
 
