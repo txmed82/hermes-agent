@@ -415,7 +415,8 @@ def _consume_ws_ticket(ws: WebSocket, reject, socket: Optional[str] = None, *,
     if (admitted := admitted_with(info)) is not None:
         track(ws, admitted)
     if not protocol_ticket:
-        # Record the credential actually accepted, not an unverified query key.
+        # Desktop/Pantheon use this consumed query-ticket path. The subprotocol
+        # ticket below intentionally carries no graphical presentation hint.
         ws.scope["hermes.graphical_chat_credential"] = True
         return None, "ticket"
     # Select only the stable public protocol during accept. The ticket-bearing protocol is a

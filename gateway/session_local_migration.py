@@ -169,7 +169,7 @@ def is_main_bot_chat(db, session_id):
         return titled['id'] in local_conversation_ids(conn, session_id)
 
 
-def follow_bot_chat(authority, session_id, policy, live, picked=()):
+def follow_bot_chat(owner, policy, live, picked=(), *, is_main_chat):
     """*policy* following its profile when the session is a Bot Chat an earlier build committed
     frozen (its delivery door, a CLI titled create, an adoption), else *policy* itself.
 
@@ -186,9 +186,7 @@ def follow_bot_chat(authority, session_id, policy, live, picked=()):
     if (policy.follows_profile or policy.ignore_user_config
             or 'follow_profile_config' in json.loads(policy.request_json)):
         return policy
-    db = authority.db
-    owner = db.get_session(session_id) or {}
-    if not bot_chat_row(owner) and not is_main_bot_chat(db, session_id):
+    if not bot_chat_row(owner) and not is_main_chat():
         return policy
     live = present_sections(live)
     config = json.loads(policy.config_json)

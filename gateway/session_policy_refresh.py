@@ -12,7 +12,7 @@ import asyncio
 import json
 import logging
 from dataclasses import asdict, replace
-from functools import partial
+from functools import cache, partial
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -143,7 +143,8 @@ def _prepare(authority, session_id, mcp_only=False, adopt_only=False, graphical=
     from hermes_state_local import local_receipt
     from hermes_state_mutation_prepared import policy_picks
     from tools.terminal_scope import build_profile_terminal_scope
-    generation = authority.db.get_session(session_id)['runtime_generation']
+    owner = authority.db.get_session(session_id)
+    generation = owner['runtime_generation']
     stored = local_receipt(authority.db, session_id)['policy']
     old = restore_policy(stored)
     # A bypass launch never reads the profile; cron, Kanban and room routes are not resumed CLI sessions.
@@ -156,13 +157,15 @@ def _prepare(authority, session_id, mcp_only=False, adopt_only=False, graphical=
     if not mcp_only:
         # Opening a Bot Chat an earlier build froze adopts it: it follows its profile from now on.
         from gateway.session_local_migration import follow_bot_chat, is_main_bot_chat
-        base = follow_bot_chat(authority, session_id, old, live, picked)
+        # Share the lazy title/lineage probe across adoption and surface restore.
+        is_main_chat = cache(partial(is_main_bot_chat, authority.db, session_id))
+        base = follow_bot_chat(owner, old, live, picked, is_main_chat=is_main_chat)
         # Old Main chats were minted by the CLI delivery door. When an authenticated
         # graphical reader opens one, restore its intended capability surface without
         # relabeling transcript provenance or importing this viewer's credentials.
         if (graphical and base.source in {'cli', 'tui'} and base.follows_profile
                 and not base.safe_mode and 'toolsets' not in json.loads(base.request_json)
-                and base.editor_mcp_json is None and is_main_bot_chat(authority.db, session_id)):
+                and base.editor_mcp_json is None and is_main_chat()):
             base = replace(base, source='gui', platform='desktop')
     if adopt_only:
         return None if base is old else (stored, old, base, {}, set(), generation)
