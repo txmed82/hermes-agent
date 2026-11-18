@@ -47,6 +47,24 @@ describe('session file card download', () => {
     }
   )
 
+  it('routes an artifact with a stored profile label to its session backend', async () => {
+    const saveGatewayFile = vi.fn().mockResolvedValue({ saved: true })
+    vi.stubGlobal('hermesDesktop', { saveGatewayFile })
+    setSessionOwnerResolver(id =>
+      id === 'artifact-id' ? { connectionId: 'producer', targetProfile: 'research' } : null
+    )
+
+    await downloadGatewayMediaFile('/project/report.docx', { sessionId: 'artifact-id', profile: 'tile-label' })
+
+    expect(saveGatewayFile).toHaveBeenCalledExactlyOnceWith({
+      connectionId: 'producer',
+      profile: 'research',
+      sessionId: 'artifact-id',
+      path: '/project/report.docx',
+      suggestedName: 'report.docx'
+    })
+  })
+
   it('does not try an unowned session against the focused profile or retry without scope', async () => {
     const saveGatewayFile = vi.fn().mockResolvedValue({ saved: true })
     vi.stubGlobal('hermesDesktop', { saveGatewayFile })
