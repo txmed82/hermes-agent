@@ -1193,7 +1193,8 @@ async def _fs_download_session(
     another profile's chat answered "Session not found". This grants no access the principal lacks,
     because it may already name any profile on this server. A profile-bound native grant is never
     widened, an unknown profile name is not reinterpreted, and a missing, blank or ambiguous id
-    still 404s. Previews and saves keep the strict
+    still 404s. A profile with no session store is skipped; any other store that cannot answer
+    fails the request closed rather than letting a partial search choose the owner. Previews and saves keep the strict
     :func:`_fs_owned_session` rule."""
     try:
         return await _fs_owned_session(session_id, profile), profile
@@ -1203,13 +1204,28 @@ async def _fs_download_session(
         if getattr(getattr(request, "state", None), "native_http_principal", None) is not None:
             raise
         from hermes_cli.profiles import list_profile_names
+        from hermes_cli.web_server_sessions import _session_db_path_for_profile
+
+        def candidates():
+            # A profile without a session store cannot own the id. Any other store must answer.
+            names = []
+            for name in list_profile_names():
+                try:
+                    if _session_db_path_for_profile(name).exists():
+                        names.append(name)
+                except HTTPException:
+                    continue
+            return names
 
         owners = []
-        for name in await asyncio.to_thread(list_profile_names):
+        for name in await asyncio.to_thread(candidates):
             try:
                 row = await _fs_owned_session(session_id, name)
-            except HTTPException:
-                continue  # Not this profile's session, or its store is unavailable.
+            except HTTPException as miss:
+                if miss.status_code == 404:
+                    continue
+                # An unreadable store might hold the id: picking another owner could be a guess.
+                raise exc from miss
             if isinstance(row, dict) and row.get("id") == session_id:
                 owners.append((row, name))
         if len(owners) != 1:

@@ -45,6 +45,7 @@ def owners(monkeypatch, tmp_path):
     for home in (default_home, default_home / "profiles" / "seldinger", default_home / "profiles" / "work"):
         home.mkdir(parents=True, exist_ok=True)
         (home / "config.yaml").write_text("terminal:\n  backend: local\n", encoding="utf-8")
+        (home / "state.db").touch()  # Every profile here has a session store.
     monkeypatch.setattr(profiles, "_get_default_hermes_home", lambda: default_home)
     monkeypatch.setenv("HERMES_HOME", str(default_home))
     monkeypatch.setenv("TERMINAL_ENV", "local")
@@ -119,14 +120,15 @@ def test_a_profile_bound_native_grant_never_resolves_another_owner(owners):
     assert ("bot-chat", "seldinger") not in owners["lookups"]
 
 
-def test_an_unavailable_other_store_is_skipped_not_reported(client, owners, monkeypatch):
+def test_a_profile_without_a_session_store_is_not_a_candidate(client, owners, monkeypatch, tmp_path):
     from hermes_cli.web_routers import sessions
 
+    (tmp_path / "default-home" / "profiles" / "work" / "state.db").unlink()
     real = sessions.get_session_detail
+    probed = []
 
     async def detail(session_id, profile=None):
-        if profile == "work":
-            raise HTTPException(status_code=503, detail="Session store is not initialized.")
+        probed.append(profile)
         return await real(session_id, profile)
 
     monkeypatch.setattr("hermes_cli.web_routers.sessions.get_session_detail", detail)
@@ -135,7 +137,26 @@ def test_an_unavailable_other_store_is_skipped_not_reported(client, owners, monk
     response = client.get("/api/fs/download", params=params)
 
     assert response.status_code == 200, response.text
-    assert response.content == b"workbook-bytes"
+    assert "work" not in probed
+
+
+def test_a_store_that_cannot_answer_fails_closed(client, owners, monkeypatch):
+    from hermes_cli.web_routers import sessions
+
+    real = sessions.get_session_detail
+
+    async def detail(session_id, profile=None):
+        if profile == "work":
+            raise HTTPException(status_code=503, detail="Session store is corrupt")
+        return await real(session_id, profile)
+
+    monkeypatch.setattr("hermes_cli.web_routers.sessions.get_session_detail", detail)
+    params = {"path": str(owners["report"]), "session_id": "bot-chat", "profile": "default"}
+
+    response = client.get("/api/fs/download", params=params)
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Session not found"
 
 
 def test_an_unknown_profile_name_is_not_reinterpreted(client, owners):
