@@ -140,7 +140,7 @@ def test_a_profile_without_a_session_store_is_not_a_candidate(client, owners, mo
     assert "work" not in probed
 
 
-def test_a_store_that_cannot_answer_fails_closed(client, owners, monkeypatch):
+def test_a_store_that_cannot_answer_fails_closed(client, owners, monkeypatch, caplog):
     from hermes_cli.web_routers import sessions
 
     real = sessions.get_session_detail
@@ -157,6 +157,7 @@ def test_a_store_that_cannot_answer_fails_closed(client, owners, monkeypatch):
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Session not found"
+    assert "owner search stopped; profile 'work' store answered 503" in caplog.text
 
 
 def test_an_unknown_profile_name_is_not_reinterpreted(client, owners):

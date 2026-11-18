@@ -1225,11 +1225,13 @@ async def _fs_download_session(
                 if miss.status_code == 404:
                     continue
                 # An unreadable store might hold the id: picking another owner could be a guess.
-                raise exc from miss
+                logger.warning("fs download: owner search stopped; profile %r store answered %s",
+                               name, miss.status_code)
+                raise HTTPException(status_code=404, detail="Session not found") from miss
             if isinstance(row, dict) and row.get("id") == session_id:
                 owners.append((row, name))
         if len(owners) != 1:
-            raise exc
+            raise HTTPException(status_code=404, detail="Session not found") from exc
         logger.info("fs download: session resolved to its owning profile %r (requested %r)",
                   owners[0][1], profile)
         return owners[0]
