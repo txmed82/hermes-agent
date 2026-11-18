@@ -21,6 +21,8 @@ class ClientSurface(WireEnum):
 
     hud = "hud"
     voice_live = "voice-live"
+    # A graphical client (Pantheon) on a terminal-created session: MEDIA:/path renders as a download card.
+    app = "app"
 
 
 class PromptSubmitParams(SessionParams):

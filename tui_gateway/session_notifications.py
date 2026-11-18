@@ -936,7 +936,7 @@ def _hud_surface_note(session: dict) -> str:
             from agent.tool_executor import _tool_search_scoped_names
             return hud_surface_note(direct, _tool_search_scoped_names(agent))
     committed = {"surface": surface, "voice_context": session.get("voice_live_context")}
-    return surface_note(committed, direct)
+    return surface_note(committed, direct, getattr(agent, "platform", None))
 
 
 def _prepend_note(run_message: Any, note: str) -> Any:
