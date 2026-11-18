@@ -89,9 +89,31 @@ def cron_default_provider(cfg: dict) -> str:
     return str(cron.get("model_provider") or "").strip() if isinstance(cron, dict) else ""
 
 
+def cron_job_model(job: dict, cfg: dict) -> str:
+    """The model an unpinned run resolves, in the run's order: the job's pin, ``cron.model``, the main
+    ``model`` (``model.default`` or the ``model: <name>`` shorthand), then ``HERMES_MODEL``.
+
+    The provider-key preflight must judge this same model. A credential pool that has benched one
+    model cannot vouch for an unnamed one, so probing with no model reports a missing login for a
+    profile whose credential serves the model the job actually runs on.
+    """
+    pinned = str(job.get("model") or "").strip() if isinstance(job, dict) else ""
+    if pinned:
+        return pinned
+    cfg = cfg if isinstance(cfg, dict) else {}
+    cron = cfg.get("cron")
+    if isinstance(cron, dict) and str(cron.get("model") or "").strip():
+        return str(cron.get("model")).strip()
+    main = cfg.get("model")
+    if isinstance(main, dict):
+        main = main.get("default") or main.get("model") or main.get("name")
+    main = str(main or "").strip() if isinstance(main, str) else ""
+    return main or str(cron_env_setting("HERMES_MODEL") or "").strip()
+
+
 def _preflight_check_provider_key(job: dict, cfg: dict) -> Optional[str]:
     """READ-ONLY probe: would provider resolution fail for lack of a key? Mirrors run_job's
-    requested-provider computation. Skipped when the job has a fallback chain — auth-fallback may
+    requested-provider and model computation. Skipped when the job has a fallback chain — auth-fallback may
     legitimately rescue a missing primary key. A pinned job has none (``_job_fallback_chain``), so
     its missing key blocks even when the global chain is configured."""
     try:
@@ -101,7 +123,7 @@ def _preflight_check_provider_key(job: dict, cfg: dict) -> Optional[str]:
         return None  # fail-open: never block on a preflight-internal error
 
     requested = job.get("provider") or cron_default_provider(cfg) or None
-    model = job.get("model") or cron_env_setting("HERMES_MODEL") or ""
+    model = cron_job_model(job, cfg)
 
     from hermes_cli.auth import AuthError, is_rate_limited_auth_error
     try:
