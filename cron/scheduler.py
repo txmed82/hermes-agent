@@ -1609,6 +1609,7 @@ def _load_cron_job_config(job: dict, job_id: str, job_name: str) -> _CronJobConf
     the main agent model (config ``model:``, then HERMES_MODEL) > the claimed welcome trial's. Re-read
     every tick (no cache) so ``hermes cron edit --model`` and ``hermes model`` both apply next tick."""
     from hermes_cli.anon_auth import trial_model
+    from cron.scheduler_preflight import cron_job_model
     model = job.get("model") or cron_env_setting("HERMES_MODEL") or ""
     _cron_default_provider = ""
     _cfg: dict = {}
@@ -1622,19 +1623,10 @@ def _load_cron_job_config(job: dict, job_id: str, job_name: str) -> _CronJobConf
             # Coerce null to {} so a falsy default never clobbers a resolved env value.
             _model_cfg = _cfg.get("model") or {}
             _cron_cfg_for_model = _cfg.get("cron") or {}
-            _cron_default_model = ""
             if isinstance(_cron_cfg_for_model, dict):
-                _cron_default_model = str(_cron_cfg_for_model.get("model") or "").strip()
                 _cron_default_provider = str(_cron_cfg_for_model.get("model_provider") or "").strip()
-            if not job.get("model"):
-                if _cron_default_model:
-                    model = _cron_default_model
-                else:
-                    # The main agent model: ``model: <name>`` shorthand or ``model.default``.
-                    _main = _model_cfg if isinstance(_model_cfg, str) else (
-                        _model_cfg.get("default") or _model_cfg.get("model") or _model_cfg.get("name")
-                        if isinstance(_model_cfg, dict) else "")
-                    model = str(_main or "").strip() or model
+            # One precedence for the run and its provider-key preflight: pin > cron.model > main > env.
+            model = cron_job_model(job, _cfg)
     except Exception as e:  # ConfigBackendUnavailable is not one: run_job fails this fire, never defaults
         logger.warning("Job '%s': failed to load config.yaml, using defaults: %s", job_id, e)
     model = (model if isinstance(model, str) else "").strip() or trial_model()

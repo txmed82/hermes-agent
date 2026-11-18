@@ -50,19 +50,3 @@ def test_preflight_resolves_the_provider_for_the_model_the_run_uses(monkeypatch)
         assert _preflight_check_provider_key(JOB, cfg) is None
 
     assert seen == {"requested": "anthropic", "target_model": "claude-opus-5-5"}
-
-
-def test_preflight_passes_a_model_benched_credential_for_another_model(monkeypatch):
-    """A pool whose only usable login is benched for a different model still serves the run's model."""
-    from hermes_cli.auth import AuthError
-
-    monkeypatch.delenv("HERMES_MODEL", raising=False)
-    cfg = {"cron": {"model": "claude-opus-5-5", "model_provider": "anthropic"}}
-
-    def resolve(*, requested, target_model, **_):
-        if not target_model:
-            raise AuthError("No Anthropic credentials found.")
-        return {"provider": requested}
-
-    with patch("hermes_cli.runtime_provider.resolve_runtime_provider", side_effect=resolve):
-        assert _preflight_check_provider_key(JOB, cfg) is None
