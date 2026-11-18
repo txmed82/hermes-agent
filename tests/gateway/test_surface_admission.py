@@ -261,6 +261,25 @@ def test_app_surface_is_admitted_and_notes_only_terminal_platform_agents():
     for platform in ('desktop', 'telegram', None):
         assert surface_note(committed, set(), platform) == '', platform
     assert 'MEDIA:/absolute/path' in APP_SURFACE_NOTE
+    spoken = admit_surface({'surface': 'app', 'voice_turn': True})['surface_v1']
+    assert surface_note(spoken, set(), 'tui') == '', 'a spoken reply is never rendered as a card'
+
+
+def test_app_surface_survives_the_managed_worker_boundary():
+    """A managed worker re-checks the committed surface and arms its own agent: the note follows the
+    worker agent's platform there too, and a reused agent drops it on the next plain turn."""
+    from gateway.session_surface import APP_SURFACE_NOTE, arm_surface_turn, restore_surface, surface_turn_scope
+
+    committed = restore_surface(json.loads(json.dumps({'surface': 'app'})))
+    terminal = SimpleNamespace(valid_tool_names={'read_file'}, platform='tui')
+    desktop = SimpleNamespace(valid_tool_names={'read_file'}, platform='desktop')
+    with surface_turn_scope(committed):
+        arm_surface_turn(terminal)
+        arm_surface_turn(desktop)
+    assert terminal._gateway_turn_context_notes == APP_SURFACE_NOTE
+    assert desktop._gateway_turn_context_notes == ''
+    arm_surface_turn(terminal)
+    assert terminal._gateway_turn_context_notes == '' and terminal._voice_turn_pending is False
 
 
 def test_resumed_terminal_created_session_learns_the_app_renderer_per_turn(tmp_path, monkeypatch):

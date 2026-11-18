@@ -79,17 +79,20 @@ APP_SURFACE_NOTE = (
 )
 
 
-def _app_note(committed, valid_tool_names, platform=None):
+def _app_note(committed, platform):
     # Only a terminal-platform agent was told there is no attachment channel; a desktop or messaging
-    # agent already has its renderer's own contract in the system hint.
-    return APP_SURFACE_NOTE if platform in _TERMINAL_PLATFORMS else ''
+    # agent already has its renderer's own contract in the system hint. A spoken turn's reply is heard,
+    # not rendered, so it never gets the download-card contract.
+    if committed.get('voice_turn') or platform not in _TERMINAL_PLATFORMS:
+        return ''
+    return APP_SURFACE_NOTE
 
 
 _SURFACE_NOTES = {'hud': _hud_note, 'voice-live': _voice_live_note}
 
 
 def surface_note(committed, valid_tool_names=None, platform=None):
-    """The model-bound note for a committed surface (``""`` for the plain app window): barge-in
+    """The model-bound note for a committed surface (``""`` when the turn declared none): barge-in
     first, then the HUD read-the-window-below prior, the spoken-delegation contract, or the
     graphical-app file-delivery contract (terminal-platform agents only)."""
     notes = []
@@ -97,7 +100,7 @@ def surface_note(committed, valid_tool_names=None, platform=None):
         from tools.tts_streaming import SPEECH_INTERRUPTED_NOTE
         notes.append(SPEECH_INTERRUPTED_NOTE)
     if committed.get('surface') == 'app':
-        notes.append(_app_note(committed, valid_tool_names, platform))
+        notes.append(_app_note(committed, platform))
     render = _SURFACE_NOTES.get(committed.get('surface'))
     if render is not None:
         notes.append(render(committed, valid_tool_names))
