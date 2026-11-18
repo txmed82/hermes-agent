@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { setApiRequestConnection, setApiRequestProfile } from '@/api/client'
+import { setApiRequestConnection, setApiRequestProfile, setSessionOwnerResolver } from '@/api/client'
 import { $notifications, clearNotifications } from '@/store/notifications'
 import { $connection } from '@/store/session'
 
-import { captureGatewayFileDownload } from './media'
+import { captureGatewayFileDownload, downloadGatewayMediaFile } from './media'
 
 beforeEach(() => {
   clearNotifications()
@@ -21,6 +21,43 @@ afterEach(() => {
 })
 
 const lastToast = () => $notifications.get()[0]
+
+describe('session file card download', () => {
+  afterEach(() => setSessionOwnerResolver(null))
+
+  it.each(['local', 'other-host', 'focused-host'])(
+    'uses the owning backend and profile, not the launch profile (%s)',
+    async connectionId => {
+      const saveGatewayFile = vi.fn().mockResolvedValue({ saved: true })
+      vi.stubGlobal('hermesDesktop', { saveGatewayFile })
+      setApiRequestConnection('focused-host')
+      setSessionOwnerResolver(id =>
+        id === 'durable-id' ? { connectionId, profile: 'tile-label', targetProfile: 'research' } : null
+      )
+
+      await downloadGatewayMediaFile('/project/report.docx', { sessionId: 'durable-id' })
+
+      expect(saveGatewayFile).toHaveBeenCalledWith({
+        connectionId,
+        profile: 'research',
+        sessionId: 'durable-id',
+        path: '/project/report.docx',
+        suggestedName: 'report.docx'
+      })
+    }
+  )
+
+  it('does not try an unowned session against the focused profile or retry without scope', async () => {
+    const saveGatewayFile = vi.fn().mockResolvedValue({ saved: true })
+    vi.stubGlobal('hermesDesktop', { saveGatewayFile })
+    setSessionOwnerResolver(() => null)
+
+    await expect(downloadGatewayMediaFile('/project/report.docx', { sessionId: 'unknown-id' })).rejects.toThrow(
+      /session owner/i
+    )
+    expect(saveGatewayFile).not.toHaveBeenCalled()
+  })
+})
 
 describe('captured gateway file download', () => {
   it('reports an unavailable desktop bridge', async () => {
