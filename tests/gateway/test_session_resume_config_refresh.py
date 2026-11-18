@@ -219,10 +219,15 @@ async def test_resume_never_changes_a_running_turns_policy(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_busy_main_chat_gains_graphical_tools_on_the_same_attachment_after_idle(tmp_path, monkeypatch):
+@pytest.mark.parametrize('legacy_adoption', [False, True], ids=['following-main', 'deferred-legacy-adoption'])
+async def test_busy_main_chat_gains_graphical_tools_on_the_same_attachment_after_idle(
+    tmp_path, monkeypatch, legacy_adoption,
+):
+    from typing import cast
     import hermes_state_runtime as rt
     from gateway.session_contract import SessionRef, Submission
     from gateway.session_controls import AuthorityConnection
+    from hermes_state import SessionDB
 
     home = _home(monkeypatch)
     started, release = asyncio.Event(), asyncio.Event()
@@ -236,34 +241,42 @@ async def test_busy_main_chat_gains_graphical_tools_on_the_same_attachment_after
     from gateway.session import SessionStore
     from gateway.session_authority import initialize_session_authority
     store = SessionStore(home / 'sessions', GatewayConfig())
-    db = store._db
+    db = cast(SessionDB | None, store._db)
     assert db is not None
     authority = await initialize_session_authority(_runner(store, handle), profile_id=str(home), instance_id='busy-main')
     owner = AuthorityConnection(authority, object(), {'user_id': 'human'})
+    terminal_viewer = AuthorityConnection(authority, object(), {'user_id': 'human'})
     viewer = AuthorityConnection(authority, object(), {'user_id': 'human', 'dashboard_chat_renderer': True})
     try:
+        main_flags = {} if legacy_adoption else {'title': 'Bot Chat', 'follow_profile_config': True}
         sid = (await _call(owner, 'session.create', request_id='old-main-busy', source='cli', cwd=str(tmp_path),
-                           title='Bot Chat', follow_profile_config=True))['session_id']
+                           **main_flags))['session_id']
+        if legacy_adoption:
+            # Desktop is already attached when this frozen thread becomes the Main Chat.
+            await _call(viewer, 'session.resume', session_id=sid)
+            assert db.set_session_title(sid, 'Bot Chat')
         turn = await authority.submit(owner.actor, Submission('turn-1', SessionRef(authority.profile_id, sid),
                                                                {'text': 'one'}, 'queue'))
         await asyncio.wait_for(started.wait(), 10)
-        await _call(viewer, 'session.resume', session_id=sid)
+        await _call(terminal_viewer if legacy_adoption else viewer, 'session.resume', session_id=sid)
         assert sid in viewer.subscriptions
         old = _policy(authority, sid)
         assert old is not None and old.platform == 'cli'
+        assert old.follows_profile is not legacy_adoption
         release.set()
         await async_wait_until(lambda: (rt.get_session_admission(db, admission_id=turn.admission_id) or {}).get('status')
                                == 'terminal', what='busy Main Chat turn to settle')
-        await _call(owner, 'session.resume', session_id=sid)
-        still_cli = _policy(authority, sid)
-        assert still_cli is not None and still_cli.platform == 'cli'
+        if not legacy_adoption:
+            await _call(owner, 'session.resume', session_id=sid)
+            still_cli = _policy(authority, sid)
+            assert still_cli is not None and still_cli.platform == 'cli'
         await _call(viewer, 'session.resume', session_id=sid)
         effective = _policy(authority, sid)
         assert effective is not None and effective.platform == 'desktop'
         assert 'desktop_ui' in effective.toolsets
     finally:
         release.set()
-        for connection in (owner, viewer):
+        for connection in (owner, terminal_viewer, viewer):
             await connection.close()
         store.close_all_db_handles()
 

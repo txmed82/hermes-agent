@@ -275,8 +275,10 @@ async def refresh_resumed_policy(authority, ref, *, attached=False, graphical=Fa
     *attached*: this client already holds the session (Desktop's warm reopen). The settings refresh is once
     per attachment, except for a deferred Bot Chat adoption. Only a graphical reopen retries a deferred
     graphical restore, with a full refresh so it actually resolves the graphical toolsets."""
-    retry_graphical = attached and graphical and ref.session_id in _pending_graphical_adoptions(authority)
-    if attached and not retry_graphical and ref.session_id not in _pending_adoptions(authority):
+    retry_adoption = attached and ref.session_id in _pending_adoptions(authority)
+    retry_graphical = attached and graphical and (
+        retry_adoption or ref.session_id in _pending_graphical_adoptions(authority))
+    if attached and not retry_adoption and not retry_graphical:
         return
     try:
         await commit_refresh(authority, ref, adopt_only=attached and not retry_graphical,
