@@ -134,7 +134,7 @@ def _server_name(servers, name):
     return name[4:] if name.startswith('mcp-') and name not in servers else name
 
 
-def _prepare(authority, session_id, mcp_only=False, adopt_only=False):
+def _prepare(authority, session_id, mcp_only=False, adopt_only=False, graphical=False):
     """Off the owner loop: the stored policy, its refresh from this profile home's files, and the generation
     it was derived at. None when the session takes no refresh or nothing moved. *adopt_only*: the adoption
     of a frozen Bot Chat alone, without the config-derived settings (a later open on the same attachment)."""
@@ -155,8 +155,15 @@ def _prepare(authority, session_id, mcp_only=False, adopt_only=False):
     base = old
     if not mcp_only:
         # Opening a Bot Chat an earlier build froze adopts it: it follows its profile from now on.
-        from gateway.session_local_migration import follow_bot_chat
+        from gateway.session_local_migration import follow_bot_chat, is_main_bot_chat
         base = follow_bot_chat(authority, session_id, old, live, picked)
+        # Old Main chats were minted by the CLI delivery door. When an authenticated
+        # graphical reader opens one, restore its intended capability surface without
+        # relabeling transcript provenance or importing this viewer's credentials.
+        if (graphical and base.source in {'cli', 'tui'} and base.follows_profile
+                and not base.safe_mode and 'toolsets' not in json.loads(base.request_json)
+                and base.editor_mcp_json is None and is_main_bot_chat(authority.db, session_id)):
+            base = replace(base, source='gui', platform='desktop')
     if adopt_only:
         return None if base is old else (stored, old, base, {}, set(), generation)
     policy, secrets, replaced = refreshed_policy(base, live, terminal, picked=picked, mcp_only=mcp_only)
@@ -185,6 +192,14 @@ def _pending_adoptions(authority):
     return found
 
 
+def _pending_graphical_adoptions(authority):
+    """Graphical Main Chat restores still awaiting an idle commit, independent of CLI adoption."""
+    found = getattr(authority, '_pending_graphical_adoptions', None)
+    if found is None:
+        found = authority._pending_graphical_adoptions = set()
+    return found
+
+
 def _in_flight(authority):
     found = getattr(authority, '_policy_refreshes', None)
     if found is None:
@@ -202,7 +217,7 @@ async def refresh_settled(authority, session_id):
         await asyncio.wait({running})  # its outcome is its caller's; a cancelled waiter leaves it running
 
 
-async def commit_refresh(authority, ref, *, mcp_only=False, adopt_only=False):
+async def commit_refresh(authority, ref, *, mcp_only=False, adopt_only=False, graphical=False):
     """Commit an idle local session's refresh as its next policy generation: True when one was committed,
     False when nothing moved. Raises the store's refusal (``session_busy`` while a turn runs or waits).
     One refresh per session at a time, run to its publication even when the caller is cancelled: a second
@@ -210,25 +225,31 @@ async def commit_refresh(authority, ref, *, mcp_only=False, adopt_only=False):
     from gateway.session_runtime_workers import track_mutation
     await refresh_settled(authority, ref.session_id)
     refreshes = _in_flight(authority)
-    task = refreshes[ref.session_id] = track_mutation(authority, _commit_refresh(authority, ref, mcp_only, adopt_only))
+    task = refreshes[ref.session_id] = track_mutation(
+        authority, _commit_refresh(authority, ref, mcp_only, adopt_only, graphical),
+    )
     task.add_done_callback(lambda done: refreshes.pop(ref.session_id, None) if refreshes.get(ref.session_id)
                            is done else None)
     return await asyncio.shield(task)
 
 
-async def _commit_refresh(authority, ref, mcp_only, adopt_only=False):
+async def _commit_refresh(authority, ref, mcp_only, adopt_only=False, graphical=False):
     from gateway.session_runtime_workers import tracked_write
     from hermes_state_mutation_prepared import commit_refreshed_policy
-    prepared = await asyncio.to_thread(_prepare, authority, ref.session_id, mcp_only, adopt_only)
+    prepared = await asyncio.to_thread(_prepare, authority, ref.session_id, mcp_only, adopt_only, graphical)
     # An MCP-only refresh never runs follow_bot_chat: it neither settles nor commits an adoption, so it
     # leaves a pending one for the next open.
     pending = _pending_adoptions(authority) if not mcp_only else set()
+    pending_graphical = _pending_graphical_adoptions(authority) if graphical and not mcp_only else set()
     if prepared is None:
         pending.discard(ref.session_id)
+        pending_graphical.discard(ref.session_id)
         return False
     stored, old, policy, secrets, replaced, generation = prepared
     if policy.follows_profile and not old.follows_profile:
         pending.add(ref.session_id)  # until this commit lands
+    if old.source in {'cli', 'tui'} and policy.source == 'gui':
+        pending_graphical.add(ref.session_id)
     moved = json.loads(policy.terminal_json) != json.loads(old.terminal_json)
     policy = _rebind(authority, ref.session_id, old, policy, secrets, replaced)
     # Compare-and-swap against the receipt as stored (JSON lists), not its restored tuple form. The
@@ -239,20 +260,24 @@ async def _commit_refresh(authority, ref, mcp_only, adopt_only=False):
                                            generation=generation),
                         then=lambda _generation: _publish(authority, ref, moved))
     pending.discard(ref.session_id)
+    pending_graphical.discard(ref.session_id)
     return True
 
 
-async def refresh_resumed_policy(authority, ref, *, attached=False):
+async def refresh_resumed_policy(authority, ref, *, attached=False, graphical=False):
     """Commit the config refresh of an idle local session before it is attached. Never fails the resume:
     a busy session, a revoked launch credential or an unreadable profile keeps the stored policy. Only a turn
     running or queued (or admitted during the commit) is expected; anything else is a WARNING.
 
     *attached*: this client already holds the session (Desktop's warm reopen). The settings refresh is once
-    per attachment, but a frozen Bot Chat whose adoption a busy open refused is adopted on any later open."""
-    if attached and ref.session_id not in _pending_adoptions(authority):
+    per attachment, except for a deferred Bot Chat adoption. Only a graphical reopen retries a deferred
+    graphical restore, with a full refresh so it actually resolves the graphical toolsets."""
+    retry_graphical = attached and graphical and ref.session_id in _pending_graphical_adoptions(authority)
+    if attached and not retry_graphical and ref.session_id not in _pending_adoptions(authority):
         return
     try:
-        await (commit_refresh(authority, ref, adopt_only=True) if attached else commit_refresh(authority, ref))
+        await commit_refresh(authority, ref, adopt_only=attached and not retry_graphical,
+                             graphical=graphical and (not attached or retry_graphical))
     except Exception as exc:  # health: allow BLE001 -- a refresh is best-effort; the resume itself must proceed
         reason = getattr(exc, 'reason', None) or type(exc).__name__
         busy = reason in {'session_busy', 'unknown_execution', 'revision_conflict'}

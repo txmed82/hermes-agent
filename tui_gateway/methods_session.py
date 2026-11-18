@@ -64,7 +64,15 @@ def _int_param(params: dict, key: str, default: int) -> int:
 
 def _new_runtime_ids(params: dict) -> tuple[str, str]:
     """Fresh runtime sid + resolved DB ``source`` for a session minted from ``params``."""
-    return uuid.uuid4().hex[:8], _resolve_session_source(_str_param(params, "source") or None)
+    from tui_gateway.transport import current_transport
+
+    source = _str_param(params, "source")
+    # Standalone serve uses compatibility RPC. Its authenticated viewer, not
+    # its process environment, supplies the default surface for this mount.
+    identity = getattr(current_transport(), "auth_identity", None) or {}
+    if not source and isinstance(identity, dict) and identity.get("dashboard_chat_renderer") is True:
+        source = "desktop"
+    return uuid.uuid4().hex[:8], _resolve_session_source(source or None)
 
 
 def _profile_build_scope(profile_home):

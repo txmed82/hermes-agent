@@ -157,6 +157,18 @@ def legacy_bot_chat_launch(row, params, api_mode, config):
     return {**params, 'follow_profile_config': True}, api_mode
 
 
+def is_main_bot_chat(db, session_id):
+    """Whether the canonical title is on this session or one of its local continuations."""
+    titled = db.get_session_by_title('Bot Chat')
+    if titled is None:
+        return False
+    if titled['id'] == session_id:
+        return True
+    from hermes_state_local import local_conversation_ids
+    with db._read_ctx() as conn:
+        return titled['id'] in local_conversation_ids(conn, session_id)
+
+
 def follow_bot_chat(authority, session_id, policy, live, picked=()):
     """*policy* following its profile when the session is a Bot Chat an earlier build committed
     frozen (its delivery door, a CLI titled create, an adoption), else *policy* itself.
@@ -176,15 +188,8 @@ def follow_bot_chat(authority, session_id, policy, live, picked=()):
         return policy
     db = authority.db
     owner = db.get_session(session_id) or {}
-    if not bot_chat_row(owner):
-        # Compression can carry the canonical title to a later segment of the same conversation.
-        titled = db.get_session_by_title('Bot Chat')
-        if titled is None:
-            return policy
-        from hermes_state_local import local_conversation_ids
-        with db._read_ctx() as conn:
-            if titled['id'] not in local_conversation_ids(conn, session_id):
-                return policy
+    if not bot_chat_row(owner) and not is_main_bot_chat(db, session_id):
+        return policy
     live = present_sections(live)
     config = json.loads(policy.config_json)
     model = config.get('model') if isinstance(config.get('model'), dict) else {}

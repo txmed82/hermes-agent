@@ -726,7 +726,19 @@ def _bot_chat_prompt_stale(agent, stored_prompt: str | None) -> bool:
                 title = str(agent._session_db.get_session_title(agent.session_id) or "").strip()
             except Exception:
                 title = ""
-        return title == BOT_CHAT_TITLE and bool(stored_bot_chat_prompt_needs_upgrade(stored_prompt, home))
+        if title != BOT_CHAT_TITLE:
+            return False
+        if (getattr(agent, "platform", None) == "desktop"
+                and identity_line_value(stored_prompt, "Platform") in {"cli", "tui"}):
+            from gateway.session_policy import active_policy
+            policy = active_policy()
+            if policy is None or (policy.source == "gui" and policy.follows_profile):
+                # Compatibility RPC has no gateway policy, but still resolves the
+                # authenticated graphical mount as Desktop. A durable GUI policy
+                # does the same on the canonical owner. Refresh the old prompt and
+                # tool pin once; rebuilt prompts no longer match the terminal guard.
+                return True
+        return bool(stored_bot_chat_prompt_needs_upgrade(stored_prompt, home))
     except Exception:
         return False
 

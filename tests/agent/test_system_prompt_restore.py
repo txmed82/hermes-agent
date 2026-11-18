@@ -640,5 +640,28 @@ def test_null_stored_prompt_does_not_take_the_stale_probe_path(tmp_path):
         restoring._build_system_prompt.assert_called_once()
 
 
+@pytest.mark.parametrize("canonical", [False, True])
+def test_graphical_main_chat_rebuilds_stored_terminal_prompt_but_not_other_chats(canonical):
+    from agent.conversation_loop import _bot_chat_prompt_stale
+    from agent.prompt_builder import PLATFORM_HINTS
+
+    agent = SimpleNamespace(
+        _bot_mode_protocol=True, _session_title_hint="Bot Chat", platform="desktop",
+        _session_db=None, session_id="existing-main-chat",
+    )
+    old = PLATFORM_HINTS["tui"] + "\n\nPlatform: tui"
+    new = PLATFORM_HINTS["desktop"] + "\n\nPlatform: desktop"
+    policy = SimpleNamespace(source="gui", follows_profile=True) if canonical else None
+    with (
+        patch("tools.bot_mode_probe.stored_prompt_capability_stale", return_value=False),
+        patch("tools.bot_mode_probe.stored_bot_chat_prompt_needs_upgrade", return_value=False),
+        patch("gateway.session_policy.active_policy", return_value=policy),
+    ):
+        assert _bot_chat_prompt_stale(agent, old)
+        assert not _bot_chat_prompt_stale(agent, new)
+        agent._session_title_hint = "Ordinary conversation"
+        assert not _bot_chat_prompt_stale(agent, old)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

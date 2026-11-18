@@ -221,6 +221,7 @@ def _fake_ws(
 
     return SimpleNamespace(
         query_params=_QP(query),
+        scope={},
         headers={"sec-websocket-protocol": ", ".join(protocols)} if protocols else {},
         client=SimpleNamespace(host=client_host),
         url=SimpleNamespace(path=path),
@@ -233,6 +234,7 @@ class TestWsAuthOkLoopback:
     def test_correct_token_accepted(self, loopback_app):
         ws = _fake_ws(query={"token": web_server._SESSION_TOKEN})
         assert _web_server_chat._ws_auth_ok(ws) is True
+        assert "hermes.graphical_chat_credential" not in ws.scope
 
     def test_webapp_socket_ticket_is_accepted_once(self, loopback_app, monkeypatch):
         """The Webapp on a loopback bind mints the browser's one-use socket ticket
@@ -285,8 +287,10 @@ class TestWsAuthOkGated:
         ws_one = _fake_ws(query={"ticket": ticket})
         ws_two = _fake_ws(query={"ticket": ticket})
         assert _web_server_chat._ws_auth_ok(ws_one) is True
+        assert ws_one.scope["hermes.graphical_chat_credential"] is True
         # Single-use — second consumption fails.
         assert _web_server_chat._ws_auth_ok(ws_two) is False
+        assert "hermes.graphical_chat_credential" not in ws_two.scope
 
     def test_ticket_subprotocol_is_single_use_and_selects_only_the_public_protocol(self, gated_app):
         ticket = mint_ticket(user_id="subprotocol-user", provider="stub")
@@ -304,6 +308,7 @@ class TestWsAuthOkGated:
         }
         assert ws_one._hermes_ws_subprotocol == _web_server_chat._GATEWAY_WS_PROTOCOL
         assert ticket not in ws_one._hermes_ws_subprotocol
+        assert "hermes.graphical_chat_credential" not in ws_one.scope
         assert _web_server_chat._ws_auth_ok(ws_two) is False
 
     def test_ticket_subprotocol_rejects_missing_public_protocol_or_ambiguous_tickets(self, gated_app):
@@ -357,6 +362,7 @@ class TestWsAuthOkGated:
         publisher = _fake_ws(query={"internal": credential}, path="/api/pub")
         assert _web_server_chat._ws_auth_ok(gateway, allow_internal=True) is True
         assert _web_server_chat._ws_auth_ok(publisher, allow_internal=True) is True
+        assert "hermes.graphical_chat_credential" not in gateway.scope
 
     @pytest.mark.parametrize("surface", ["dashboard", "serve"])
     def test_off_the_webapp_internal_credential_opens_every_socket_as_on_main(
@@ -388,6 +394,7 @@ class TestWsAuthOkGated:
             "user_id": "remote-desktop-user",
             "provider": "stub",
         }
+        assert ws.scope["hermes.graphical_chat_credential"] is True
 
     def test_invalid_session_token_rejected_in_gated_mode(self, gated_app):
         """A bogus ?token= fails with token_invalid (and audits), not a crash."""

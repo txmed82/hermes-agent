@@ -9,6 +9,34 @@ from hermes_state import SessionDB
 from tui_gateway import server
 
 
+@pytest.mark.parametrize("identity,requested,expected", [
+    ({"dashboard_chat_renderer": True}, None, "desktop"),
+    ({"dashboard_chat_renderer": True}, "tui", "tui"),
+    ({}, None, "tui"),
+])
+def test_compatibility_mount_uses_authenticated_viewer_default(monkeypatch, identity, requested, expected):
+    from tui_gateway.transport import bind_transport, reset_transport
+
+    class Viewer:
+        auth_identity = identity
+
+        def write(self, obj: dict) -> bool:
+            return True
+
+        def close(self):
+            pass
+
+    monkeypatch.delenv("HERMES_DESKTOP", raising=False)
+    monkeypatch.delenv("HERMES_DESKTOP_TERMINAL", raising=False)
+    # The RPC method installer binds this helper into the server namespace.
+    token = bind_transport(Viewer())
+    try:
+        _, source = vars(server)["_new_runtime_ids"]({"source": requested} if requested else {})
+        assert source == expected
+    finally:
+        reset_transport(token)
+
+
 @pytest.mark.parametrize("source,omit_messages", [("desktop", True), ("desktop", False), ("tui", True)])
 @pytest.mark.parametrize("profile", [None, "work"])
 def test_deferred_resume_preserves_model_history_and_db_ownership(tmp_path, monkeypatch, source, omit_messages, profile):

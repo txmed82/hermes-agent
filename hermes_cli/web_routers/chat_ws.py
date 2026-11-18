@@ -674,6 +674,12 @@ async def gateway_ws(ws: WebSocket) -> None:
         # The dashboard gate authorizes the whole host (its REST routes take ``?profile=`` for
         # every profile), so its socket may select any served sibling too.
         identity = {**identity, 'profile_scope': 'host'}
+        # Presentation hint for the shipped graphical clients' authenticated
+        # query-ticket and verified native session-token transports. This is
+        # not client identity or a permission grant. It does not apply to the
+        # Ink console's internal/native connection or legacy loopback token.
+        if ws.scope.get('hermes.graphical_chat_credential') is True:
+            identity['dashboard_chat_renderer'] = True
     ticket_home = getattr(ws, "_hermes_ticket_profile_home", None)
     served = authority
     if ticket_home and authority is None:
