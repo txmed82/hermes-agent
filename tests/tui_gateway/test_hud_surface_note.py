@@ -93,6 +93,16 @@ class TestTurnRouting:
         """Every other client (TUI, dashboard, messaging) omits the field."""
         assert server._hud_surface_note(_session()) == ""
 
+    def test_app_turn_on_a_terminal_agent_gets_the_card_contract(self):
+        from gateway.session_surface import APP_SURFACE_NOTE
+        agent = types.SimpleNamespace(valid_tool_names=set(FULL_KIT), platform="tui", _voice_turn_pending=False)
+        assert server._hud_surface_note(_session(client_surface="app") | {"agent": agent}) == APP_SURFACE_NOTE
+
+    def test_spoken_app_turn_gets_no_card_contract(self):
+        """prompt_turn pops voice_turn into the agent before this note is built: the agent flag must count."""
+        agent = types.SimpleNamespace(valid_tool_names=set(FULL_KIT), platform="tui", _voice_turn_pending=True)
+        assert server._hud_surface_note(_session(client_surface="app") | {"agent": agent}) == ""
+
     def test_survives_an_agent_with_no_toolset_at_all(self):
         session = _session(client_surface="hud")
         session["agent"] = types.SimpleNamespace()

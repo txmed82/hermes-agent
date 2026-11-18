@@ -244,3 +244,121 @@ def test_managed_worker_turn_carries_the_committed_surface_to_the_model(tmp_path
     assert turns['plain'] == ('main-model', 'PLAIN_TURN'), 'the following typed turn carries no surface'
     # The voice route rewrites only its own request's model identity; main-model turns share one prefix.
     assert len({r['messages'][0]['content'] for r in model.requests if r['model'] == 'main-model'}) == 1
+
+
+def test_app_surface_is_admitted_and_notes_only_terminal_platform_agents():
+    """``app`` (a graphical client such as Pantheon) commits like any surface, refuses a smuggled
+    transcript, and corrects only the terminal hint: a desktop agent already has its renderer's contract."""
+    from gateway.session_surface import APP_SURFACE_NOTE, admit_surface, restore_surface, surface_note
+    from hermes_state_runtime import RuntimeStoreError
+
+    committed = admit_surface({'surface': 'app'})['surface_v1']
+    assert committed == {'surface': 'app'} and restore_surface(committed) == committed
+    with pytest.raises(RuntimeStoreError, match='invalid_params'):
+        admit_surface({'surface': 'app', 'voice_context': 'User: smuggled'})
+    assert surface_note(committed, set(), 'tui') == APP_SURFACE_NOTE
+    assert surface_note(committed, set(), 'cli') == APP_SURFACE_NOTE
+    for platform in ('desktop', 'telegram', None):
+        assert surface_note(committed, set(), platform) == '', platform
+    assert 'MEDIA:/absolute/path' in APP_SURFACE_NOTE
+    spoken = admit_surface({'surface': 'app', 'voice_turn': True})['surface_v1']
+    assert surface_note(spoken, set(), 'tui') == '', 'a spoken reply is never rendered as a card'
+
+
+def test_app_surface_survives_the_managed_worker_boundary():
+    """A managed worker re-checks the committed surface and arms its own agent: the note follows the
+    worker agent's platform there too, and a reused agent drops it on the next plain turn."""
+    from gateway.session_surface import APP_SURFACE_NOTE, arm_surface_turn, restore_surface, surface_turn_scope
+
+    committed = restore_surface(json.loads(json.dumps({'surface': 'app'})))
+    terminal = SimpleNamespace(valid_tool_names={'read_file'}, platform='tui')
+    desktop = SimpleNamespace(valid_tool_names={'read_file'}, platform='desktop')
+    with surface_turn_scope(committed):
+        arm_surface_turn(terminal)
+        arm_surface_turn(desktop)
+    assert terminal._gateway_turn_context_notes == APP_SURFACE_NOTE
+    assert desktop._gateway_turn_context_notes == ''
+    arm_surface_turn(terminal)
+    assert terminal._gateway_turn_context_notes == '' and terminal._voice_turn_pending is False
+
+
+def test_resumed_terminal_created_session_learns_the_app_renderer_per_turn(tmp_path, monkeypatch):
+    """The cross-client case: a chat CREATED in the TUI is resumed on a new connection by a graphical
+    app. The app's turn carries the MEDIA download-card contract on its model input; the same session's
+    plain turn (a real terminal) does not; the TUI system hint and the tool scope never change."""
+    from agent.prompt_builder import PLATFORM_HINTS
+    from gateway.session_surface import APP_SURFACE_NOTE
+
+    root = Path(__file__).resolve().parents[2]
+    home, user = tmp_path / 'state', tmp_path / 'user'
+    home.mkdir(mode=0o700)
+    user.mkdir()
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    monkeypatch.setenv('HOME', str(user))
+    monkeypatch.setenv('USERPROFILE', str(user))
+    model = ThreadingHTTPServer(('127.0.0.1', 0), Model)
+    model.requests = []
+    model.blocked, model.release = threading.Event(), threading.Event()
+    thread = threading.Thread(target=model.serve_forever, daemon=True)
+    thread.start()
+    base = f'http://127.0.0.1:{model.server_port}/v1'
+    (home / 'config.yaml').write_text(json.dumps({
+        'gateway': {'multiplex_profiles': False},
+        'model': {'provider': 'custom', 'default': 'local-wire-stub', 'base_url': base},
+        'auxiliary': {'title_generation': {'enabled': False}},
+        'terminal': {'cwd': str(home)},
+    }))
+    env = child_env() | dict(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home),
+        PYTHONPATH=str(root), OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=base, PYTHONUNBUFFERED='1')
+
+    async def drive(desc):
+        async with websocket(home, desc) as ws:
+            created = await rpc(ws, 'session.create', request_id='tui-created', source='tui', cwd=str(home),
+                                toolsets=['file'])
+            assert 'result' in created, created
+            sid = created['result']['session_id']
+            first = await rpc(ws, 'prompt.submit', session_id=sid, submission_id='terminal', text='TERMINAL_TURN')
+            assert first.get('result', {}).get('status') == 'queued', first
+            await asyncio.to_thread(_wait_for, lambda: _admissions(home).get('terminal') == 'terminal')
+        # The graphical client resumes on its own connection, sending no source (Pantheon's resume).
+        async with websocket(home, desc) as ws:
+            resumed = await rpc(ws, 'session.resume', session_id=sid)
+            assert 'result' in resumed, resumed
+            for name, extra in (('app', {'surface': 'app'}), ('plain', {})):
+                reply = await rpc(ws, 'prompt.submit', session_id=sid, submission_id=name,
+                                  text=name.upper() + '_TURN', **extra)
+                assert reply.get('result', {}).get('status') == 'queued', reply
+                await asyncio.to_thread(_wait_for, lambda: _admissions(home).get(name) == 'terminal')
+        return sid
+
+    try:
+        with daemon(root, home, env, barrier=False) as (_proc, desc):
+            sid = asyncio.run(drive(desc))
+    finally:
+        model.release.set()
+        model.shutdown()
+        model.server_close()
+        thread.join(timeout=5)
+
+    with closing(sqlite3.connect(f'file:{home / "state.db"}?mode=ro', uri=True)) as db:
+        source, created_source = db.execute(
+            'SELECT source, created_source FROM sessions WHERE id = ?', (sid,)).fetchone()
+        payloads = dict(db.execute('SELECT request_id, payload_json FROM session_admissions'))
+    assert created_source == 'tui', (source, created_source)
+    assert json.loads(payloads['app'])['surface_v1'] == {'surface': 'app'}
+    assert 'surface_v1' not in json.loads(payloads['plain']) and 'surface_v1' not in json.loads(payloads['terminal'])
+    turns = {}
+    for request in model.requests:
+        content = next(m['content'] for m in reversed(request['messages']) if m['role'] == 'user')
+        text = content if isinstance(content, str) else ''.join(p.get('text', '') for p in content)
+        name = next((n for n in ('terminal', 'app', 'plain') if n.upper() + '_TURN' in text), None)
+        if name:
+            turns[name] = (request, text)
+    assert set(turns) == {'terminal', 'app', 'plain'}, turns
+    assert APP_SURFACE_NOTE in turns['app'][1] and turns['app'][1].startswith('APP_TURN')
+    assert APP_SURFACE_NOTE not in turns['plain'][1] and APP_SURFACE_NOTE not in turns['terminal'][1]
+    systems = {request['messages'][0]['content'] for request, _ in turns.values()}
+    assert len(systems) == 1, 'the frozen system prefix must not vary per surface'
+    assert PLATFORM_HINTS['tui'] in next(iter(systems)), 'the terminal platform hint stays the TUI one'
+    tools = [sorted(t['function']['name'] for t in request.get('tools') or []) for request, _ in turns.values()]
+    assert tools[0] and all(t == tools[0] for t in tools), 'the app surface never widens or narrows tool scope'
