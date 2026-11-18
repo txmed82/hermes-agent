@@ -331,6 +331,9 @@ def _ws_auth_reason(ws: WebSocket, *, allow_internal: bool = False,
                     "user_id": getattr(session, "user_id", None),
                     "provider": getattr(session, "provider", None),
                 })
+                # Token-mode Remote Desktop uses this verified provider path,
+                # not the legacy loopback token handled below.
+                ws.scope["hermes.graphical_chat_credential"] = True
                 audit_log(
                     AuditEvent.TOKEN_AUTH_SUCCESS,
                     provider=getattr(session, "provider", None),
@@ -412,6 +415,9 @@ def _consume_ws_ticket(ws: WebSocket, reject, socket: Optional[str] = None, *,
     if (admitted := admitted_with(info)) is not None:
         track(ws, admitted)
     if not protocol_ticket:
+        # Desktop/Pantheon use this consumed query-ticket path. The subprotocol
+        # ticket below intentionally carries no graphical presentation hint.
+        ws.scope["hermes.graphical_chat_credential"] = True
         return None, "ticket"
     # Select only the stable public protocol during accept. The ticket-bearing protocol is a
     # credential and must never be reflected back to the browser or retained after admission.

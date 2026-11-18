@@ -122,6 +122,51 @@ async def test_resume_after_restart_rereads_config_derived_fields_and_keeps_pick
 
 
 @pytest.mark.asyncio
+async def test_graphical_owner_mount_restores_main_chat_policy_not_other_cli_threads(tmp_path, monkeypatch):
+    from gateway.config import GatewayConfig
+    from gateway.session import SessionStore
+    from gateway.session_authority import initialize_session_authority
+    from gateway.session_controls import AuthorityConnection
+    from hermes_state import SessionDB
+    from typing import cast
+
+    home = _home(monkeypatch)
+    store = SessionStore(home / 'sessions', GatewayConfig())
+    db = cast(SessionDB, store._db)
+    authority = await initialize_session_authority(_runner(store), profile_id=str(home), instance_id='main-chat')
+    terminal = AuthorityConnection(authority, object(), {'user_id': 'human'})
+    graphical = AuthorityConnection(authority, object(), {'user_id': 'human', 'dashboard_chat_renderer': True})
+    try:
+        main = (await _call(terminal, 'session.create', request_id='old-main', source='cli',
+                            cwd=str(tmp_path), title='Bot Chat', follow_profile_config=True))['session_id']
+        plain = (await _call(terminal, 'session.create', request_id='plain-cli', source='cli',
+                             cwd=str(tmp_path)))['session_id']
+        db.append_message(main, 'user', 'Retained synthetic main-chat context')
+        before = db.get_session(main)
+        assert before is not None
+        old = _policy(authority, main)
+        assert old is not None and old.platform == 'cli'
+        assert 'desktop_ui' not in old.toolsets
+
+        await _call(graphical, 'session.resume', session_id=plain)
+        unchanged = _policy(authority, plain)
+        assert unchanged is not None and unchanged.platform == 'cli'
+        await _call(graphical, 'session.resume', session_id=main)
+        effective = _policy(authority, main)
+        assert effective is not None and effective.platform == 'desktop'
+        assert {'desktop_ui', 'web', 'terminal'} <= set(effective.toolsets)
+        assert effective.model == 'm1'
+        after = db.get_session(main)
+        assert after is not None
+        assert (after['id'], after['created_source'], after['title']) == (main, before['created_source'], 'Bot Chat')
+        assert db.get_messages_as_conversation(main)[0]['content'] == 'Retained synthetic main-chat context'
+    finally:
+        await graphical.close()
+        await terminal.close()
+        store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
 async def test_resume_never_changes_a_running_turns_policy(tmp_path, monkeypatch):
     from gateway.config import GatewayConfig
     from gateway.session import SessionStore
@@ -169,6 +214,75 @@ async def test_resume_never_changes_a_running_turns_policy(tmp_path, monkeypatch
     finally:
         release.set()
         for connection in (owner, viewer, late):
+            await connection.close()
+        store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('case', ['following-main', 'deferred-legacy-adoption', 'committed-legacy-adoption'])
+async def test_busy_main_chat_gains_graphical_tools_on_the_same_attachment_after_idle(
+    tmp_path, monkeypatch, case,
+):
+    from typing import cast
+    import hermes_state_runtime as rt
+    from gateway.session_contract import SessionRef, Submission
+    from gateway.session_controls import AuthorityConnection
+    from hermes_state import SessionDB
+
+    home = _home(monkeypatch)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def handle(event):
+        started.set()
+        await release.wait()
+        return 'ok'
+
+    from gateway.config import GatewayConfig
+    from gateway.session import SessionStore
+    from gateway.session_authority import initialize_session_authority
+    store = SessionStore(home / 'sessions', GatewayConfig())
+    db = cast(SessionDB | None, store._db)
+    assert db is not None
+    authority = await initialize_session_authority(_runner(store, handle), profile_id=str(home), instance_id='busy-main')
+    owner = AuthorityConnection(authority, object(), {'user_id': 'human'})
+    terminal_viewer = AuthorityConnection(authority, object(), {'user_id': 'human'})
+    viewer = AuthorityConnection(authority, object(), {'user_id': 'human', 'dashboard_chat_renderer': True})
+    try:
+        legacy_adoption = case != 'following-main'
+        main_flags = {} if legacy_adoption else {'title': 'Bot Chat', 'follow_profile_config': True}
+        sid = (await _call(owner, 'session.create', request_id='old-main-busy', source='cli', cwd=str(tmp_path),
+                           **main_flags))['session_id']
+        if legacy_adoption:
+            # Desktop is already attached when this frozen thread becomes the Main Chat.
+            await _call(viewer, 'session.resume', session_id=sid)
+            assert db.set_session_title(sid, 'Bot Chat')
+        turn = await authority.submit(owner.actor, Submission('turn-1', SessionRef(authority.profile_id, sid),
+                                                               {'text': 'one'}, 'queue'))
+        await asyncio.wait_for(started.wait(), 10)
+        if case != 'committed-legacy-adoption':
+            await _call(terminal_viewer if legacy_adoption else viewer, 'session.resume', session_id=sid)
+        assert sid in viewer.subscriptions
+        old = _policy(authority, sid)
+        assert old is not None and old.platform == 'cli'
+        assert old.follows_profile is not legacy_adoption
+        release.set()
+        await async_wait_until(lambda: (rt.get_session_admission(db, admission_id=turn.admission_id) or {}).get('status')
+                               == 'terminal', what='busy Main Chat turn to settle')
+        if case == 'committed-legacy-adoption':
+            await _call(terminal_viewer, 'session.resume', session_id=sid)
+            adopted = _policy(authority, sid)
+            assert adopted is not None and adopted.follows_profile and adopted.platform == 'cli'
+        if not legacy_adoption:
+            await _call(owner, 'session.resume', session_id=sid)
+            still_cli = _policy(authority, sid)
+            assert still_cli is not None and still_cli.platform == 'cli'
+        await _call(viewer, 'session.resume', session_id=sid)
+        effective = _policy(authority, sid)
+        assert effective is not None and effective.platform == 'desktop'
+        assert 'desktop_ui' in effective.toolsets
+    finally:
+        release.set()
+        for connection in (owner, terminal_viewer, viewer):
             await connection.close()
         store.close_all_db_handles()
 
@@ -663,7 +777,8 @@ def test_a_skipped_resume_refresh_warns_unless_the_session_is_busy(monkeypatch, 
     from hermes_state_runtime import RuntimeStoreError
     for failure in (RuntimeStoreError('session_busy'), RuntimeStoreError('launch_credentials_unavailable'),
                     OSError('config.yaml unreadable')):
-        async def fail(authority, ref, failure=failure):
+        async def fail(authority, ref, *, adopt_only=False, graphical=False, failure=failure):
+            assert not adopt_only and not graphical  # ordinary resume, not a graphical adoption
             raise failure
         monkeypatch.setattr(refresh, 'commit_refresh', fail)
         with caplog.at_level(logging.INFO, logger=refresh.__name__):

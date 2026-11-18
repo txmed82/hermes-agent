@@ -61,6 +61,7 @@ def _fake_ws(*, query: dict, client_host: str = "203.0.113.7", path: str = "/api
 
     return SimpleNamespace(
         query_params=_QP(query),
+        scope={},
         headers={},
         client=SimpleNamespace(host=client_host),
         url=SimpleNamespace(path=path),
