@@ -935,7 +935,10 @@ def _hud_surface_note(session: dict) -> str:
             from agent.prompt_builder import hud_surface_note
             from agent.tool_executor import _tool_search_scoped_names
             return hud_surface_note(direct, _tool_search_scoped_names(agent))
-    committed = {"surface": surface, "voice_context": session.get("voice_live_context")}
+    # prompt_turn pops the submit's voice_turn into the agent before asking for this note: a spoken turn's
+    # reply is heard, not rendered, so it must not get the app's download-card contract.
+    voice_turn = bool(session.get("voice_turn") or getattr(agent, "_voice_turn_pending", False))
+    committed = {"surface": surface, "voice_context": session.get("voice_live_context"), "voice_turn": voice_turn}
     return surface_note(committed, direct, getattr(agent, "platform", None))
 
 
