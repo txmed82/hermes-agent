@@ -106,6 +106,39 @@ def test_discard_keeps_a_tree_when_its_holders_cannot_be_read(tmp_path, monkeypa
     assert install._reclaim_set_aside(store) == 0 and aside.is_dir()
 
 
+def test_discard_checks_holders_only_after_the_tree_left_its_name(tmp_path, monkeypatch):
+    # A launcher can exec the entry's old name between a holder check and the delete; nothing
+    # execs the fresh `.reclaim-*` name, so the check has to run on that one.
+    checked = []
+    monkeypatch.setattr(process_holders, "executable_holders",
+                        lambda tree: checked.append((tree.name, tree.is_dir())) or [])
+    store = Store(tmp_path / "store")
+    _entry(store.entry(".previous-tool-1"), b"old")
+
+    install._discard_entry(store, ".previous-tool-1")
+    [(name, existed)] = checked
+    assert name.startswith(".reclaim-") and existed
+    assert not list(store.root.iterdir())
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_an_exited_unreaped_child_is_not_an_unlinked_executable():
+    import subprocess
+    import sys
+    import time
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:  # wait for exit without reaping: a zombie
+            if process_holders.executable_state(child.pid) == (None, False):
+                break
+            time.sleep(0.05)
+        assert process_holders.executable_state(child.pid) == (None, False)
+    finally:
+        child.wait(timeout=10)
+
+
 def test_discard_still_removes_a_tree_nothing_executes(tmp_path, monkeypatch):
     monkeypatch.setattr(process_holders, "executable_holders", lambda tree: [])
     store = Store(tmp_path / "store")

@@ -1,10 +1,15 @@
-"""Doctor check: the gateway (and anything else) still running a replaced PM toolchain.
+"""Doctor check: processes still running a replaced PM toolchain.
 
 PM sets a replaced store tree aside (``.previous-*``, ``.reclaim-*``, ``.displaced-*``) while a
 live process executes from it, and deletes it once nothing does (``pm.process_holders``). A process
 in that state keeps the old interpreter until it restarts; one whose executable was deleted
 outright (by an older PM, or by hand) is worse on macOS: tccd cannot name it, so every privacy
 decision for its responsibility chain (Desktop, Documents, ...) is denied until a restart.
+
+Checked: the gateway, its launchers and its children for a deleted or set-aside executable, and
+every process for a set-aside store tree. A deleted executable is looked for only in the gateway's
+tree: outside it, an unlinked executable is usually some other app's self-update (browsers do this
+routinely) and says nothing about Hermes.
 """
 
 from __future__ import annotations
@@ -67,7 +72,12 @@ def _gateway_process_tree(pid: int) -> list[tuple[int, str]]:
     try:
         process = psutil.Process(pid)
         tree += [(parent.pid, "gateway launcher") for parent in process.parents() if parent.pid > 1]
-        tree += [(child.pid, "gateway child") for child in process.children(recursive=True)]
+        for child in process.children(recursive=True):
+            try:
+                if child.status() != psutil.STATUS_ZOMBIE:  # exited, unreaped: nothing to restart
+                    tree.append((child.pid, "gateway child"))
+            except psutil.Error:
+                continue
     except psutil.Error:
         pass  # exited mid-scan: whatever was collected is still worth checking
     return tree
@@ -89,6 +99,7 @@ def _set_aside_holders(roots: list[Path]) -> list[tuple[int, Path]]:
 def check_replaced_runtime(manual_issues: list[str]) -> None:
     """Warn about the gateway tree, or any other process, running a replaced PM interpreter."""
     from gateway.status import get_running_pid
+    from pm.process_holders import can_inspect
 
     roots = _store_roots()
     gateway_pid = get_running_pid(cleanup_stale=False)
@@ -100,8 +111,8 @@ def check_replaced_runtime(manual_issues: list[str]) -> None:
                 gateway_findings.setdefault(pid, f"{role} PID {pid} {reason}")
     other_findings = {pid: f"PID {pid} still runs the replaced toolchain {tree.name}"
                       for pid, tree in _set_aside_holders(roots) if pid not in gateway_findings}
-    if gateway_pid is None and not other_findings:
-        return
+    if not other_findings and (gateway_pid is None or not gateway_findings and not can_inspect()):
+        return  # nothing to report, or a platform that cannot tell what the gateway runs
     _section("Gateway Runtime")
     if not gateway_findings and not other_findings:
         return check_ok("Gateway runs the current interpreter")

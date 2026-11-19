@@ -85,6 +85,34 @@ def test_a_gateway_on_its_live_interpreter_is_ok(store, monkeypatch, capsys):
     assert issues == []
 
 
+def test_a_platform_that_cannot_inspect_processes_claims_nothing(store, monkeypatch, capsys):
+    from pm import process_holders
+
+    monkeypatch.setattr(process_holders, "_platform", lambda: None)
+    _gateway(monkeypatch, 4242)
+    issues: list[str] = []
+    doctor.check_replaced_runtime(issues)
+    assert capsys.readouterr().out == "" and issues == []
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_gateway_process_tree_skips_exited_unreaped_children():
+    import os
+    import time
+
+    import psutil
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        deadline = time.monotonic() + 10
+        while psutil.Process(child.pid).status() != psutil.STATUS_ZOMBIE:
+            assert time.monotonic() < deadline, "child never exited"
+            time.sleep(0.05)
+        assert child.pid not in dict(doctor._gateway_process_tree(os.getpid()))
+    finally:
+        child.wait(timeout=10)
+
+
 def test_no_gateway_and_no_holders_prints_nothing(store, monkeypatch, capsys):
     import gateway.status
 

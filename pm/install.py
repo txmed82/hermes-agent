@@ -271,7 +271,7 @@ def executing_holders(tree: Path) -> list[int] | None:
         return None
 
 
-def _discard_entry(store: Store, entry_name: str) -> None:
+def _discard_entry(store: Store, entry_name: str, *, executable: bool = True) -> None:
     """Drop a tree a finished publish or restore left behind as garbage.
 
     A running Hermes process can keep the replaced interpreter's DLLs mapped
@@ -279,34 +279,56 @@ def _discard_entry(store: Store, entry_name: str) -> None:
     as broken (#124807). Windows still allows renaming a tree with mapped
     images, so it moves to a `.reclaim-*` name: its slot is free for the next
     publish, no restore ever picks it up, and the next install or
-    `hermes pm gc` deletes it once the hold is gone. POSIX would delete a tree a
-    live process executes from, so a tree with an executing holder takes the same
-    route before any removal is attempted.
+    `hermes pm gc` deletes it once the hold is gone.
+
+    POSIX deletes a tree a live process executes from without complaint, so a
+    tree that may hold executables moves to its `.reclaim-*` name first and is
+    checked for executing holders under that name: a launcher can still exec
+    the old name between a check and the delete, but nothing execs a fresh
+    random name. A fetched archive (``executable=False``) is never run in place
+    and is removed directly.
     """
-    holders = executing_holders(store.entry(entry_name))
-    if holders != []:
-        reason = (f"PID {', '.join(map(str, holders))} still executes from it; restart those "
-                  "processes (for the gateway: `hermes gateway restart`) to run the replacement"
-                  if holders else "its running processes could not be checked")
-        _set_aside(store, entry_name, reason)
-        return
-    try:
-        _remove_entry(store, entry_name)
-        return
-    except OSError as e:
-        _set_aside(store, entry_name, str(e))
-
-
-def _set_aside(store: Store, entry_name: str, reason: str) -> None:
     import uuid
 
+    aside = f"{_SET_ASIDE_PREFIX}{uuid.uuid4().hex}"
+    if executable:
+        try:
+            store.entry(entry_name).rename(store.entry(aside))
+        except FileNotFoundError:
+            return
+        except OSError:
+            aside = entry_name  # removal below still runs; a held tree just stays put
+        holders = executing_holders(store.entry(aside))
+        if holders:
+            return _report_set_aside(
+                entry_name, aside,
+                f"{'PIDs' if len(holders) > 1 else 'PID'} {', '.join(map(str, holders))} still "
+                "executing from it; restart them (for the gateway: `hermes gateway restart`) "
+                "to run the replacement")
+        if holders is None:
+            return _report_set_aside(entry_name, aside, "its running processes could not be checked")
+        target = aside
+    else:
+        target = entry_name
     try:
-        store.entry(entry_name).rename(store.entry(f"{_SET_ASIDE_PREFIX}{uuid.uuid4().hex}"))
-    except OSError:
-        LOG.warning("could not remove or set aside %s: %s", entry_name, reason)
+        _remove_entry(store, target)
         return
-    LOG.warning("%s is still in use (%s); set aside for the next install or `hermes pm gc`",
-                entry_name, reason)
+    except OSError as e:
+        reason = str(e)
+    if target == entry_name:
+        try:
+            store.entry(entry_name).rename(store.entry(aside))
+        except OSError:
+            aside = entry_name
+    _report_set_aside(entry_name, aside, reason)
+
+
+def _report_set_aside(entry_name: str, aside: str, reason: str) -> None:
+    if aside == entry_name:
+        LOG.warning("could not remove or set aside %s: %s", entry_name, reason)
+    else:
+        LOG.warning("%s is still in use (%s); set aside for the next install or `hermes pm gc`",
+                    entry_name, reason)
 
 
 def _reclaim_set_aside(store: Store) -> int:
@@ -326,7 +348,7 @@ def _reclaim_set_aside(store: Store) -> int:
 def _remove_downloads(store: Store, artifacts: list[dict]) -> None:
     """Release this package's archives after publication, under its store lock."""
     for artifact in artifacts:
-        _discard_entry(store, f"fetch-{artifact['sha256']}")
+        _discard_entry(store, f"fetch-{artifact['sha256']}", executable=False)
 
 
 def _entry_verified(package: Package, fact: dict, store: Store, target: str) -> bool:

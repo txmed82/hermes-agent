@@ -20,6 +20,9 @@ import sys
 
 _DARWIN_ALL_PIDS = 1  # PROC_ALL_PIDS
 _DARWIN_PATH_MAX = 4096  # PROC_PIDPATHINFO_MAXSIZE
+_DARWIN_BSDINFO = 3  # PROC_PIDTBSDINFO
+_DARWIN_BSDINFO_SIZE = 136  # sizeof(struct proc_bsdinfo)
+_DARWIN_ZOMBIE = 5  # SZOMB, proc_bsdinfo.pbi_status
 _LINUX_DELETED = " (deleted)"
 _DARWIN_LIBPROC = None
 
@@ -34,6 +37,9 @@ def _darwin_libproc():
         lib.proc_listpids.argtypes = (ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int)
         lib.proc_pidpath.restype = ctypes.c_int
         lib.proc_pidpath.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
+        lib.proc_pidinfo.restype = ctypes.c_int
+        lib.proc_pidinfo.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p,
+                                     ctypes.c_int)
         _DARWIN_LIBPROC = lib
     return _DARWIN_LIBPROC
 
@@ -63,9 +69,18 @@ def _darwin_executable(pid: int) -> tuple[str | None, bool]:
     ctypes.set_errno(0)
     if lib.proc_pidpath(pid, buffer, _DARWIN_PATH_MAX) > 0:
         return os.fsdecode(buffer.value), False
-    # ENOENT is the kernel saying the process is alive but its executable has no name left,
-    # the same failure tccd logs as ``proc_pidpath_audittoken() failed``.
-    return None, ctypes.get_errno() == errno.ENOENT
+    # ENOENT is the kernel saying the process has no executable name left, the same failure tccd
+    # logs as ``proc_pidpath_audittoken() failed``. Count it only for a live, non-zombie process.
+    return None, ctypes.get_errno() == errno.ENOENT and _darwin_running(pid)
+
+
+def _darwin_running(pid: int) -> bool:
+    import ctypes
+
+    info = ctypes.create_string_buffer(_DARWIN_BSDINFO_SIZE)
+    if _darwin_libproc().proc_pidinfo(pid, _DARWIN_BSDINFO, 0, info, _DARWIN_BSDINFO_SIZE) <= 0:
+        return False
+    return struct.unpack_from("<I", info.raw, 4)[0] != _DARWIN_ZOMBIE
 
 
 def _linux_pids() -> list[int]:
@@ -88,6 +103,11 @@ def _platform():
     if sys.platform.startswith("linux") and os.path.isdir("/proc"):
         return _linux_pids, _linux_executable
     return None
+
+
+def can_inspect() -> bool:
+    """Whether this platform reports process executables (macOS, Linux with procfs)."""
+    return _platform() is not None
 
 
 def executable_state(pid: int) -> tuple[str | None, bool] | None:
