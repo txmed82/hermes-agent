@@ -252,6 +252,25 @@ def _remove_entry(store: Store, entry_name: str, *, attempts: int = 5) -> None:
 _SET_ASIDE_PREFIX = ".reclaim-"
 
 
+def executing_holders(tree: Path) -> list[int] | None:
+    """PIDs of live processes executing a binary from ``tree``; None when that cannot be read.
+
+    POSIX deletes such a tree without complaint and the process runs on unlinked inodes; on macOS
+    every later privacy (TCC) check of its responsibility chain then fails, because tccd cannot
+    name its executable (see ``pm.process_holders``). Callers keep the tree on None.
+    """
+    from pm.process_holders import executable_holders
+
+    if tree.is_symlink() or not tree.is_dir():
+        return []
+    try:
+        return executable_holders(tree)
+    except OSError as exc:
+        LOG.warning("cannot tell whether a running process executes from %s (%s); keeping it",
+                    tree.name, exc)
+        return None
+
+
 def _discard_entry(store: Store, entry_name: str) -> None:
     """Drop a tree a finished publish or restore left behind as garbage.
 
@@ -260,28 +279,42 @@ def _discard_entry(store: Store, entry_name: str) -> None:
     as broken (#124807). Windows still allows renaming a tree with mapped
     images, so it moves to a `.reclaim-*` name: its slot is free for the next
     publish, no restore ever picks it up, and the next install or
-    `hermes pm gc` deletes it once the hold is gone.
+    `hermes pm gc` deletes it once the hold is gone. POSIX would delete a tree a
+    live process executes from, so a tree with an executing holder takes the same
+    route before any removal is attempted.
     """
-    import uuid
-
+    holders = executing_holders(store.entry(entry_name))
+    if holders != []:
+        reason = (f"PID {', '.join(map(str, holders))} still executes from it; restart those "
+                  "processes (for the gateway: `hermes gateway restart`) to run the replacement"
+                  if holders else "its running processes could not be checked")
+        _set_aside(store, entry_name, reason)
+        return
     try:
         _remove_entry(store, entry_name)
         return
     except OSError as e:
-        error = e
+        _set_aside(store, entry_name, str(e))
+
+
+def _set_aside(store: Store, entry_name: str, reason: str) -> None:
+    import uuid
+
     try:
         store.entry(entry_name).rename(store.entry(f"{_SET_ASIDE_PREFIX}{uuid.uuid4().hex}"))
     except OSError:
-        LOG.warning("could not remove or set aside %s: %s", entry_name, error)
+        LOG.warning("could not remove or set aside %s: %s", entry_name, reason)
         return
     LOG.warning("%s is still in use (%s); set aside for the next install or `hermes pm gc`",
-                entry_name, error)
+                entry_name, reason)
 
 
 def _reclaim_set_aside(store: Store) -> int:
     """Delete set-aside trees whose hold is gone; the caller holds the store lock."""
     removed = 0
     for item in sorted(store.root.glob(f"{_SET_ASIDE_PREFIX}*")):
+        if executing_holders(item) != []:
+            continue
         try:
             _remove_entry(store, item.name, attempts=1)
         except OSError:

@@ -12,7 +12,8 @@ import urllib.error
 from pathlib import Path
 
 from pm import termux_libs
-from pm.install import _facts, _lockfile, _reclaim_set_aside, _store, ensure, stage_only
+from pm.install import (_facts, _lockfile, _reclaim_set_aside, _store, ensure, executing_holders,
+                        stage_only)
 from pm.operations import lock_project
 from pm.package import InstallError
 from pm.paths import repo_root
@@ -550,6 +551,9 @@ def _gc_store(store, facts) -> tuple[int, int]:
             if item.name.startswith(".") and not item.name.startswith(".staging-"):
                 continue
             if item.name in keep:
+                continue
+            if executing_holders(item) != []:
+                print(f"keeping {item.name}: a running process still executes from it")
                 continue
             print(f"removing {item.name}")
             shutil.rmtree(item, ignore_errors=True)

@@ -583,6 +583,10 @@ def _check_gateway_supervision(should_fix: bool, f: Finding) -> None:
     _check_gateway_service_linger(f.issues)
     _check_s6_supervision(f.issues)
     _check_windows_gateway_autostart(should_fix, f)
+    from hermes_cli.doctor_replaced_runtime import check_replaced_runtime
+
+    with warn_on_error("Could not check for replaced gateway interpreters"):
+        check_replaced_runtime(f.manual_issues)
 
 
 @doctor_check()
