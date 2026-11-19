@@ -92,6 +92,26 @@ def test_gc_keeps_an_orphaned_entry_a_process_executes(tmp_path):
     assert not orphan.exists()
 
 
+@pytest.mark.platforms("linux", "macos")
+def test_discard_keeps_an_executing_tree_it_could_not_rename(tmp_path, monkeypatch):
+    # Without the set-aside rename the race window is back, but deleting a tree a process
+    # already executes from is the failure this whole path exists to prevent.
+    store = Store(tmp_path / "store")
+    tree = store.entry(".previous-tool-1")
+    real_rename = Path.rename
+
+    def refuse(self, target):
+        if self == tree:
+            raise PermissionError(13, "rename refused")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", refuse)
+    with running_from(_entry(tree, b"old")) as process:
+        install._discard_entry(store, ".previous-tool-1")
+        assert (tree / "marker").read_bytes() == b"old"
+        assert process_holders.executable_state(process.pid)[1] is False
+
+
 def test_discard_keeps_a_tree_when_its_holders_cannot_be_read(tmp_path, monkeypatch):
     def unreadable(tree):
         raise OSError("process table unavailable")

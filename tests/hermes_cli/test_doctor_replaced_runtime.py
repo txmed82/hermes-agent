@@ -60,6 +60,14 @@ def test_flags_a_gateway_running_a_set_aside_toolchain(store, monkeypatch, capsy
     assert len(issues) == 1 and "hermes gateway restart" in issues[0]
 
 
+@pytest.mark.platforms("macos")
+def test_set_aside_tree_matches_a_differently_cased_spelling(store):
+    # APFS is case-insensitive and libproc reports the launcher's spelling of the path.
+    executable = str(store / ".previous-python-1" / "bin" / "python3").upper()
+    assert doctor._set_aside_tree(executable, [store]) is not None
+    assert doctor._set_aside_tree(str(store / "python-1" / "bin" / "python3").upper(), [store]) is None
+
+
 @pytest.mark.platforms("linux", "macos")
 def test_flags_other_processes_still_running_a_set_aside_toolchain(store, monkeypatch, capsys):
     import gateway.status

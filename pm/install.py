@@ -290,41 +290,44 @@ def _discard_entry(store: Store, entry_name: str, *, executable: bool = True) ->
     """
     import uuid
 
-    aside = f"{_SET_ASIDE_PREFIX}{uuid.uuid4().hex}"
+    fresh = f"{_SET_ASIDE_PREFIX}{uuid.uuid4().hex}"
+    current = entry_name  # where the tree sits now
     if executable:
         try:
-            store.entry(entry_name).rename(store.entry(aside))
+            store.entry(entry_name).rename(store.entry(fresh))
+            current = fresh
         except FileNotFoundError:
             return
         except OSError:
-            aside = entry_name  # removal below still runs; a held tree just stays put
-        holders = executing_holders(store.entry(aside))
+            # Still check under the old name: the exec race is narrow, deleting a tree a process
+            # already executes from is the failure this guards against.
+            pass
+        holders = executing_holders(store.entry(current))
         if holders:
             return _report_set_aside(
-                entry_name, aside,
+                entry_name, current,
                 f"{'PIDs' if len(holders) > 1 else 'PID'} {', '.join(map(str, holders))} still "
                 "executing from it; restart them (for the gateway: `hermes gateway restart`) "
                 "to run the replacement")
         if holders is None:
-            return _report_set_aside(entry_name, aside, "its running processes could not be checked")
-        target = aside
-    else:
-        target = entry_name
+            return _report_set_aside(entry_name, current, "its running processes could not be checked")
     try:
-        _remove_entry(store, target)
+        _remove_entry(store, current)
         return
     except OSError as e:
         reason = str(e)
-    if target == entry_name:
+    if current == entry_name:
         try:
-            store.entry(entry_name).rename(store.entry(aside))
+            store.entry(entry_name).rename(store.entry(fresh))
+            current = fresh
         except OSError:
-            aside = entry_name
-    _report_set_aside(entry_name, aside, reason)
+            pass
+    _report_set_aside(entry_name, current, reason)
 
 
-def _report_set_aside(entry_name: str, aside: str, reason: str) -> None:
-    if aside == entry_name:
+def _report_set_aside(entry_name: str, current: str, reason: str) -> None:
+    """Log where a tree that could not be removed now sits (``current``)."""
+    if current == entry_name:
         LOG.warning("could not remove or set aside %s: %s", entry_name, reason)
     else:
         LOG.warning("%s is still in use (%s); set aside for the next install or `hermes pm gc`",

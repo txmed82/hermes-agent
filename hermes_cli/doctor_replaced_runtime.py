@@ -35,14 +35,22 @@ def _store_roots() -> list[Path]:
 
 
 def _set_aside_tree(executable: str, roots: list[Path]) -> Path | None:
-    """The set-aside store tree ``executable`` lies in, or None."""
-    path = Path(executable)
+    """The set-aside store tree ``executable`` lies in, or None.
+
+    Compared the way ``pm.process_holders`` compares (case-folded on macOS): libproc reports the
+    launcher's spelling of the path, which need not match the store root's.
+    """
+    from pm.process_holders import fold_path
+
+    folded = Path(fold_path(executable))
     for root in roots:
         try:
-            first = path.relative_to(root).parts[0]
-        except (ValueError, IndexError):
+            depth = len(folded.relative_to(fold_path(str(root))).parts)
+        except ValueError:
             continue
-        if first.startswith(_SET_ASIDE_PREFIXES):
+        parts = Path(executable).parts
+        first = parts[len(parts) - depth] if depth else ""
+        if fold_path(first).startswith(_SET_ASIDE_PREFIXES):
             return root / first
     return None
 

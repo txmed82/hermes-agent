@@ -123,7 +123,8 @@ def executable_state(pid: int) -> tuple[str | None, bool] | None:
     return platform[1](pid)
 
 
-def _fold(path: str) -> str:
+def fold_path(path: str) -> str:
+    """``path`` in the form the holder comparison uses (case-folded on macOS)."""
     path = os.path.normcase(path)
     # APFS defaults to case-insensitive and libproc reports the opener's spelling; folding on a
     # case-sensitive volume can only over-report a holder, which keeps a tree, never loses one.
@@ -131,7 +132,7 @@ def _fold(path: str) -> str:
 
 
 def _inside(path: str, roots: tuple[str, ...]) -> bool:
-    candidate = _fold(path)
+    candidate = fold_path(path)
     return any(candidate == root or candidate.startswith(root + os.sep) for root in roots)
 
 
@@ -146,7 +147,7 @@ def executable_holders(tree: Path) -> list[int]:
     if platform is None:
         return []
     list_pids, executable = platform
-    roots = tuple({_fold(os.path.abspath(tree)), _fold(os.path.realpath(tree))})
+    roots = tuple({fold_path(os.path.abspath(tree)), fold_path(os.path.realpath(tree))})
     holders = []
     for pid in list_pids():
         path, unlinked = executable(pid)
