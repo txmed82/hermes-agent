@@ -86,7 +86,7 @@ def _darwin_status(pid: int) -> int | None:
     info = ctypes.create_string_buffer(_DARWIN_BSDINFO_SIZE)
     if _darwin_libproc().proc_pidinfo(pid, _DARWIN_BSDINFO, 0, info, _DARWIN_BSDINFO_SIZE) <= 0:
         return None
-    return struct.unpack_from("<I", info.raw, 4)[0]
+    return struct.unpack_from("=I", info.raw, 4)[0]
 
 
 def _linux_pids() -> list[int]:
@@ -98,9 +98,21 @@ def _linux_executable(pid: int) -> tuple[str | None, bool]:
         target = os.readlink(f"/proc/{pid}/exe")
     except OSError:
         return None, False  # gone, a kernel thread, or not ours
-    if target.endswith(_LINUX_DELETED) and not os.path.exists(target):
-        return target[: -len(_LINUX_DELETED)], True
-    return target, False
+    if not target.endswith(_LINUX_DELETED):
+        return target, False
+    # The suffix is the kernel's annotation unless a file really has that name; the running inode
+    # tells them apart, and also catches a binary deleted and recreated at the same path.
+    try:
+        running = os.stat(f"/proc/{pid}/exe")
+    except OSError:
+        return None, False  # exited between the two reads
+    try:
+        named = os.stat(target)
+    except OSError:
+        named = None
+    if named is not None and (named.st_dev, named.st_ino) == (running.st_dev, running.st_ino):
+        return target, False
+    return target[: -len(_LINUX_DELETED)], True
 
 
 def _platform():

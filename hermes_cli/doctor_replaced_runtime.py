@@ -6,10 +6,10 @@ in that state keeps the old interpreter until it restarts; one whose executable 
 outright (by an older PM, or by hand) is worse on macOS: tccd cannot name it, so every privacy
 decision for its responsibility chain (Desktop, Documents, ...) is denied until a restart.
 
-Checked: the gateway, its launchers and its children for a deleted or set-aside executable, and
-every process for a set-aside store tree. A deleted executable is looked for only in the gateway's
-tree: outside it, an unlinked executable is usually some other app's self-update (browsers do this
-routinely) and says nothing about Hermes.
+Checked: the gateway and its launchers for a deleted or set-aside executable, the processes the
+gateway spawned for a set-aside one or a deleted one that lay in a store tree, and every process for
+a set-aside store tree. Any other deleted executable, inside or outside the gateway's tree, is
+usually some program's own self-update (browsers do this routinely) and says nothing about Hermes.
 """
 
 from __future__ import annotations
@@ -56,8 +56,19 @@ def _set_aside_tree(executable: str, roots: list[Path]) -> Path | None:
     return None
 
 
-def replaced_runtime_reason(pid: int, roots: list[Path]) -> str | None:
-    """Why ``pid`` runs a replaced interpreter, or None when it does not (or cannot be told)."""
+def _in_store(executable: str, roots: list[Path]) -> bool:
+    from pm.process_holders import fold_path
+
+    folded = Path(fold_path(executable))
+    return any(folded.is_relative_to(fold_path(str(root))) for root in roots)
+
+
+def replaced_runtime_reason(pid: int, roots: list[Path], *, any_deleted: bool = True) -> str | None:
+    """Why ``pid`` runs a replaced interpreter, or None when it does not (or cannot be told).
+
+    With ``any_deleted`` False a deleted executable counts only when it lay in a store tree, which
+    only Linux can still tell (macOS has no name left for it).
+    """
     from pm.process_holders import executable_state
 
     state = executable_state(pid)
@@ -65,7 +76,9 @@ def replaced_runtime_reason(pid: int, roots: list[Path]) -> str | None:
         return None
     executable, unlinked = state
     if unlinked:
-        return "runs an executable that was deleted"
+        if any_deleted or executable is not None and _in_store(executable, roots):
+            return "runs an executable that was deleted"
+        return None
     if executable is not None and _set_aside_tree(executable, roots) is not None:
         return f"runs a replaced toolchain ({executable})"
     return None
@@ -74,20 +87,23 @@ def replaced_runtime_reason(pid: int, roots: list[Path]) -> str | None:
 def _gateway_process_tree(pid: int) -> list[tuple[int, str]]:
     """``(pid, role)`` for the gateway, its launcher ancestors and every process it spawned.
 
-    Launchers are the unbroken chain of ancestors running the gateway's own program (the
-    supervising interpreter above a re-exec'd gateway); a shell, terminal or tmux further up is
-    not Hermes, and its own self-update says nothing about the gateway.
+    Launchers are the unbroken chain of ancestors whose own command line is a gateway run (the
+    supervising interpreter above a re-exec'd gateway), matched the way ``gateway.status``
+    identifies a gateway. A shell, IDE or any other interpreter further up is not Hermes, and its
+    own self-update says nothing about the gateway.
     """
     tree = [(pid, "gateway")]
     try:
         import psutil
     except ImportError:
         return tree
+    from gateway.status import _read_process_cmdline, looks_like_gateway_runtime_command_line
+
     try:
         process = psutil.Process(pid)
-        program = process.name()
         for parent in process.parents():
-            if parent.pid <= 1 or parent.name() != program:
+            if parent.pid <= 1 or not looks_like_gateway_runtime_command_line(
+                    _read_process_cmdline(parent.pid)):
                 break
             tree.append((parent.pid, "gateway launcher"))
         for child in process.children(recursive=True):
@@ -128,7 +144,7 @@ def check_replaced_runtime(manual_issues: list[str]) -> None:
     gateway_findings: dict[int, str] = {}
     if gateway_pid is not None:
         for pid, role in _gateway_process_tree(gateway_pid):
-            reason = replaced_runtime_reason(pid, roots)
+            reason = replaced_runtime_reason(pid, roots, any_deleted=role != "gateway child")
             if reason is not None:
                 gateway_findings.setdefault(pid, f"{role} PID {pid} {reason}")
     set_aside = _set_aside_holders(roots)

@@ -55,6 +55,34 @@ def test_holders_follow_a_rename_and_lose_an_unlinked_executable(tmp_path):
         assert process_holders.executable_holders(tmp_path) == []
 
 
+@pytest.mark.platforms("linux")
+def test_a_binary_deleted_and_recreated_at_its_path_is_still_unlinked(tmp_path):
+    # The process keeps the old inode; the file now at its path is a different one. (macOS
+    # proc_pidpath names the recreated path again, so tccd can attribute it: nothing to flag there.)
+    with running_from(tmp_path / "tool-1") as process:
+        binary = next((tmp_path / "tool-1" / "bin").iterdir())
+        binary.unlink()
+        binary.write_bytes(b"replacement")
+        assert process_holders.executable_state(process.pid) == (str(binary), True)
+
+
+@pytest.mark.platforms("linux")
+def test_a_deleted_binary_is_unlinked_beside_a_file_named_like_the_annotation(tmp_path):
+    # `<path> (deleted)` existing on disk says nothing about the inode the process runs.
+    with running_from(tmp_path / "tool-1") as process:
+        binary = next((tmp_path / "tool-1" / "bin").iterdir())
+        binary.unlink()
+        binary.with_name(f"{binary.name} (deleted)").write_bytes(b"unrelated")
+        assert process_holders.executable_state(process.pid) == (str(binary), True)
+
+
+@pytest.mark.platforms("linux")
+def test_an_executable_really_named_deleted_is_not_unlinked(tmp_path):
+    with running_from(tmp_path / "tool-1", name="python (deleted)") as process:
+        path, unlinked = process_holders.executable_state(process.pid)
+        assert (path, unlinked) == (str(tmp_path / "tool-1" / "bin" / "python (deleted)"), False)
+
+
 @pytest.mark.platforms("linux", "macos")
 def test_holders_include_a_process_launched_through_a_symlinked_store(tmp_path):
     # The kernel names the executable's vnode, so the resolved tree matches.

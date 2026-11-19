@@ -194,24 +194,68 @@ def test_gateway_process_tree_reaches_spawned_workers():
 
 
 @pytest.mark.platforms("linux", "macos")
-def test_launchers_are_ancestors_running_the_gateway_program_and_stop_at_anything_else():
+def test_launchers_are_ancestors_whose_command_line_is_a_gateway_run(tmp_path):
     import psutil
 
-    # sh -> python (launcher) -> python (gateway): the shell above them is not a launcher.
-    script = ("import subprocess, sys; "
-              "subprocess.run([sys.executable, '-c', 'import time; print(flush=True); time.sleep(60)'])")
-    shell = subprocess.Popen(["/bin/sh", "-c", f'"{sys.executable}" -c "{script}"; :'],
-                             stdout=subprocess.PIPE)
+    # python (unrelated script) -> python hermes_cli/main.py gateway run (launcher) -> python
+    # (gateway). The outer interpreter runs the same program as the gateway but is not a launcher.
+    main = tmp_path / "hermes_cli" / "main.py"
+    main.parent.mkdir()
+    main.write_text("import subprocess, sys\n"
+                    "subprocess.run([sys.executable, '-c', 'import time; print(flush=True); time.sleep(60)'])\n")
+    outer = subprocess.Popen(
+        [sys.executable, "-c",
+         f"import subprocess, sys; subprocess.run([sys.executable, {str(main)!r}, 'gateway', 'run'])"],
+        stdout=subprocess.PIPE)
     try:
-        shell.stdout.readline()
-        [launcher] = psutil.Process(shell.pid).children()
+        outer.stdout.readline()
+        [launcher] = psutil.Process(outer.pid).children()
         [gateway] = launcher.children()
         tree = dict(doctor._gateway_process_tree(gateway.pid))
         assert tree[launcher.pid] == "gateway launcher"
-        assert shell.pid not in tree
+        assert outer.pid not in tree
     finally:
-        for process in psutil.Process(shell.pid).children(recursive=True):
+        for process in psutil.Process(outer.pid).children(recursive=True):
             process.kill()
-        shell.kill()
-        shell.wait(timeout=10)
-        shell.stdout.close()
+        outer.kill()
+        outer.wait(timeout=10)
+        outer.stdout.close()
+
+
+def _gateway_with_child(monkeypatch, child_pid):
+    import os
+
+    import gateway.status
+
+    monkeypatch.setattr(gateway.status, "get_running_pid", lambda **kw: os.getpid())
+    monkeypatch.setattr(doctor, "_gateway_process_tree",
+                        lambda pid: [(pid, "gateway"), (child_pid, "gateway child")])
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_a_spawned_program_whose_own_binary_was_deleted_is_no_gateway_restart(
+        store, tmp_path, monkeypatch, capsys):
+    # A browser or tool the gateway launched that updated itself is not a replaced Hermes runtime.
+    tree = tmp_path / "elsewhere" / "browser-1"
+    with running_from(tree) as process:
+        shutil.rmtree(tree)
+        _gateway_with_child(monkeypatch, process.pid)
+        issues: list[str] = []
+        doctor.check_replaced_runtime(issues)
+
+    out = capsys.readouterr().out
+    assert str(process.pid) not in out and issues == []
+    assert "Gateway runs the current interpreter" in out
+
+
+@pytest.mark.platforms("linux")
+def test_flags_a_gateway_child_whose_deleted_executable_lay_in_the_store(store, monkeypatch, capsys):
+    with running_from(store / "python-1") as process:
+        shutil.rmtree(store / "python-1")
+        _gateway_with_child(monkeypatch, process.pid)
+        issues: list[str] = []
+        doctor.check_replaced_runtime(issues)
+
+    out = capsys.readouterr().out
+    assert f"gateway child PID {process.pid} runs an executable that was deleted" in out
+    assert len(issues) == 1 and "hermes gateway restart" in issues[0]

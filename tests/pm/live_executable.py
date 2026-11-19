@@ -19,9 +19,9 @@ import pytest
 
 
 @contextmanager
-def running_from(tree: Path):
+def running_from(tree: Path, name: str | None = None):
     binary = Path(sys._base_executable).resolve()
-    copy = tree / "bin" / binary.name
+    copy = tree / "bin" / (name or binary.name)
     copy.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(binary, copy)
     process = subprocess.Popen(
