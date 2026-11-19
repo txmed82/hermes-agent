@@ -47,6 +47,28 @@ def test_flags_a_gateway_whose_interpreter_was_deleted(store, tmp_path, monkeypa
 
 
 @pytest.mark.platforms("linux", "macos")
+def test_a_failed_holder_scan_keeps_the_gateway_verdict(store, tmp_path, monkeypatch, capsys):
+    import pm.process_holders
+
+    def unreadable(tree):
+        raise OSError("proc_listpids failed")
+
+    (store / ".previous-python-0").mkdir()
+    tree = tmp_path / "elsewhere" / "python-1"
+    with running_from(tree) as process:
+        shutil.rmtree(tree)
+        _gateway(monkeypatch, process.pid)
+        monkeypatch.setattr(pm.process_holders, "executable_holders", unreadable)
+        issues: list[str] = []
+        doctor.check_replaced_runtime(issues)
+
+    out = capsys.readouterr().out
+    assert f"gateway PID {process.pid} runs an executable that was deleted" in out
+    assert "Could not read the process table" in out
+    assert len(issues) == 1 and "hermes gateway restart" in issues[0]
+
+
+@pytest.mark.platforms("linux", "macos")
 def test_flags_a_gateway_running_a_set_aside_toolchain(store, monkeypatch, capsys):
     with running_from(store / "python-1") as process:
         (store / "python-1").rename(store / ".previous-python-1")

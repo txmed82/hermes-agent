@@ -9,11 +9,12 @@ restart. A rename keeps the executable nameable; only deletion breaks it.
 
 from __future__ import annotations
 
+import errno
 from pathlib import Path
 
 import pytest
 
-from pm import install, process_holders
+from pm import filesystem, install, process_holders
 from pm.lock import Facts
 from pm.store import Store
 from tests.pm.live_executable import running_from
@@ -116,6 +117,7 @@ def test_discard_keeps_an_executing_tree_it_could_not_rename(tmp_path, monkeypat
         return real_rename(self, target)
 
     monkeypatch.setattr(Path, "rename", refuse)
+    monkeypatch.setattr(filesystem, "_HELD_RETRY_DELAYS", (0,))
     with running_from(_entry(tree, b"old")) as process:
         install._discard_entry(store, ".previous-tool-1")
         assert (tree / "marker").read_bytes() == b"old"
@@ -148,6 +150,30 @@ def test_discard_checks_holders_only_after_the_tree_left_its_name(tmp_path, monk
     install._discard_entry(store, ".previous-tool-1")
     [(name, existed)] = checked
     assert name.startswith(".reclaim-") and existed
+    assert not list(store.root.iterdir())
+
+
+def test_discard_rides_out_a_transient_hold_on_the_set_aside_rename(tmp_path, monkeypatch):
+    # Falling back to the public name reopens the exec race, so a briefly held rename is retried
+    # and the holder check still runs on the fresh `.reclaim-*` name.
+    store = Store(tmp_path / "store")
+    tree = _entry(store.entry(".previous-tool-1"), b"old")
+    real_rename, refusals = Path.rename, []
+
+    def busy_once(self, target):
+        if self == tree and not refusals:
+            refusals.append(target)
+            raise OSError(errno.EBUSY, "resource busy")
+        return real_rename(self, target)
+
+    checked = []
+    monkeypatch.setattr(Path, "rename", busy_once)
+    monkeypatch.setattr(filesystem, "_HELD_RETRY_DELAYS", (0,))
+    monkeypatch.setattr(process_holders, "executable_holders",
+                        lambda tree: checked.append(tree.name) or [])
+    install._discard_entry(store, ".previous-tool-1")
+    assert len(refusals) == 1
+    assert len(checked) == 1 and checked[0].startswith(".reclaim-")
     assert not list(store.root.iterdir())
 
 

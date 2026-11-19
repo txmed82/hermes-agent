@@ -101,7 +101,8 @@ def _gateway_process_tree(pid: int) -> list[tuple[int, str]]:
     return tree
 
 
-def _set_aside_holders(roots: list[Path]) -> list[tuple[int, Path]]:
+def _set_aside_holders(roots: list[Path]) -> list[tuple[int, Path]] | None:
+    """``(pid, tree)`` for every process running a set-aside tree; None when the scan failed."""
     from pm.process_holders import executable_holders
 
     holders = []
@@ -110,7 +111,10 @@ def _set_aside_holders(roots: list[Path]) -> list[tuple[int, Path]]:
             continue
         for tree in sorted(root.iterdir()):
             if tree.name.startswith(_SET_ASIDE_PREFIXES) and tree.is_dir() and not tree.is_symlink():
-                holders += [(pid, tree) for pid in executable_holders(tree)]
+                try:
+                    holders += [(pid, tree) for pid in executable_holders(tree)]
+                except OSError:
+                    return None  # the gateway verdict above it still stands
     return holders
 
 
@@ -127,15 +131,19 @@ def check_replaced_runtime(manual_issues: list[str]) -> None:
             reason = replaced_runtime_reason(pid, roots)
             if reason is not None:
                 gateway_findings.setdefault(pid, f"{role} PID {pid} {reason}")
+    set_aside = _set_aside_holders(roots)
     other_findings = {pid: f"PID {pid} still runs the replaced toolchain {tree.name}"
-                      for pid, tree in _set_aside_holders(roots) if pid not in gateway_findings}
-    if not other_findings and (gateway_pid is None or not gateway_findings and not can_inspect()):
+                      for pid, tree in set_aside or () if pid not in gateway_findings}
+    if set_aside is not None and not other_findings and (
+            gateway_pid is None or not gateway_findings and not can_inspect()):
         return  # nothing to report, or a platform that cannot tell what the gateway runs
     _section("Gateway Runtime")
     if gateway_pid is not None and not gateway_findings and can_inspect():
         check_ok("Gateway runs the current interpreter")
     for detail in (*gateway_findings.values(), *other_findings.values()):
         check_warn(detail)
+    if set_aside is None:
+        check_warn("Could not read the process table to check other processes for a replaced toolchain")
     if gateway_findings:
         manual_issues.append(
             f"Restart the gateway ({_RESTART_HINT}): it runs an interpreter that was replaced or "

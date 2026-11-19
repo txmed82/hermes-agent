@@ -294,13 +294,14 @@ def _discard_entry(store: Store, entry_name: str, *, executable: bool = True) ->
     current = entry_name  # where the tree sits now
     if executable:
         try:
-            store.entry(entry_name).rename(store.entry(fresh))
+            retry_held(lambda: store.entry(entry_name).rename(store.entry(fresh)))
             current = fresh
         except FileNotFoundError:
             return
         except OSError:
             # Still check under the old name: the exec race is narrow, deleting a tree a process
-            # already executes from is the failure this guards against.
+            # already executes from is the failure this guards against. A held `.previous-*`
+            # tree left here is settled by the next install of its entry.
             pass
         holders = executing_holders(store.entry(current))
         if holders:

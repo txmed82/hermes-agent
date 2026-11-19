@@ -55,7 +55,7 @@ def _darwin_pids() -> list[int]:
         if used <= 0:
             raise OSError(ctypes.get_errno(), "proc_listpids failed")
         if used < size:
-            return [pid for pid in struct.unpack_from(f"<{used // 4}i", buffer.raw) if pid > 0]
+            return [pid for pid in struct.unpack_from(f"={used // 4}i", buffer.raw) if pid > 0]
         size *= 2
 
 
