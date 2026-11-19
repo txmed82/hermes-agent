@@ -141,6 +141,27 @@ def test_discard_checks_holders_only_after_the_tree_left_its_name(tmp_path, monk
     assert not list(store.root.iterdir())
 
 
+@pytest.mark.platforms("macos")
+def test_darwin_status_reads_pbi_status():
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert process_holders._darwin_status(child.pid) == 2  # SRUN
+        child.send_signal(signal.SIGSTOP)
+        deadline = time.monotonic() + 10
+        while process_holders._darwin_status(child.pid) != 4:  # SSTOP; pbi_xstatus would be 17
+            assert time.monotonic() < deadline, process_holders._darwin_status(child.pid)
+            time.sleep(0.05)
+        assert process_holders._darwin_running(child.pid)
+    finally:
+        child.kill()
+        child.wait(timeout=10)
+
+
 @pytest.mark.platforms("linux", "macos")
 def test_an_exited_unreaped_child_is_not_an_unlinked_executable():
     import subprocess

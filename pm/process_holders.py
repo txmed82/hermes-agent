@@ -75,12 +75,18 @@ def _darwin_executable(pid: int) -> tuple[str | None, bool]:
 
 
 def _darwin_running(pid: int) -> bool:
+    status = _darwin_status(pid)
+    return status is not None and status != _DARWIN_ZOMBIE
+
+
+def _darwin_status(pid: int) -> int | None:
+    """``proc_bsdinfo.pbi_status`` (SRUN 2, SSTOP 4, SZOMB 5), the field after ``pbi_flags``."""
     import ctypes
 
     info = ctypes.create_string_buffer(_DARWIN_BSDINFO_SIZE)
     if _darwin_libproc().proc_pidinfo(pid, _DARWIN_BSDINFO, 0, info, _DARWIN_BSDINFO_SIZE) <= 0:
-        return False
-    return struct.unpack_from("<I", info.raw, 4)[0] != _DARWIN_ZOMBIE
+        return None
+    return struct.unpack_from("<I", info.raw, 4)[0]
 
 
 def _linux_pids() -> list[int]:

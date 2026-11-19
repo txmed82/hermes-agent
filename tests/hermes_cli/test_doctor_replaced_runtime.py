@@ -79,7 +79,21 @@ def test_flags_other_processes_still_running_a_set_aside_toolchain(store, monkey
 
     out = capsys.readouterr().out
     assert f"PID {process.pid} still runs the replaced toolchain .reclaim-abc" in out
+    assert "Gateway runs the current interpreter" not in out  # no gateway, no claim about one
     assert len(issues) == 1 and "replaced toolchain" in issues[0]
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_a_healthy_gateway_is_reported_alongside_other_holders(store, monkeypatch, capsys):
+    with running_from(store / "python-1") as gateway, running_from(store / ".reclaim-abc") as other:
+        _gateway(monkeypatch, gateway.pid)
+        issues: list[str] = []
+        doctor.check_replaced_runtime(issues)
+
+    out = capsys.readouterr().out
+    assert "Gateway runs the current interpreter" in out
+    assert f"PID {other.pid} still runs the replaced toolchain .reclaim-abc" in out
+    assert len(issues) == 1 and "hermes gateway restart" not in issues[0]
 
 
 @pytest.mark.platforms("linux", "macos")
@@ -139,7 +153,30 @@ def test_gateway_process_tree_reaches_spawned_workers():
         tree = dict(doctor._gateway_process_tree(os.getpid()))
         assert tree[os.getpid()] == "gateway"
         assert tree[child.pid] == "gateway child"
-        assert "gateway launcher" in tree.values()
     finally:
         child.kill()
         child.wait(timeout=10)
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_launchers_are_ancestors_running_the_gateway_program_and_stop_at_anything_else():
+    import psutil
+
+    # sh -> python (launcher) -> python (gateway): the shell above them is not a launcher.
+    script = ("import subprocess, sys; "
+              "subprocess.run([sys.executable, '-c', 'import time; print(flush=True); time.sleep(60)'])")
+    shell = subprocess.Popen(["/bin/sh", "-c", f'"{sys.executable}" -c "{script}"; :'],
+                             stdout=subprocess.PIPE)
+    try:
+        shell.stdout.readline()
+        [launcher] = psutil.Process(shell.pid).children()
+        [gateway] = launcher.children()
+        tree = dict(doctor._gateway_process_tree(gateway.pid))
+        assert tree[launcher.pid] == "gateway launcher"
+        assert shell.pid not in tree
+    finally:
+        for process in psutil.Process(shell.pid).children(recursive=True):
+            process.kill()
+        shell.kill()
+        shell.wait(timeout=10)
+        shell.stdout.close()

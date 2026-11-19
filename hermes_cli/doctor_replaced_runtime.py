@@ -71,7 +71,12 @@ def replaced_runtime_reason(pid: int, roots: list[Path]) -> str | None:
 
 
 def _gateway_process_tree(pid: int) -> list[tuple[int, str]]:
-    """``(pid, role)`` for the gateway, its launcher ancestors and every process it spawned."""
+    """``(pid, role)`` for the gateway, its launcher ancestors and every process it spawned.
+
+    Launchers are the unbroken chain of ancestors running the gateway's own program (the
+    supervising interpreter above a re-exec'd gateway); a shell, terminal or tmux further up is
+    not Hermes, and its own self-update says nothing about the gateway.
+    """
     tree = [(pid, "gateway")]
     try:
         import psutil
@@ -79,7 +84,11 @@ def _gateway_process_tree(pid: int) -> list[tuple[int, str]]:
         return tree
     try:
         process = psutil.Process(pid)
-        tree += [(parent.pid, "gateway launcher") for parent in process.parents() if parent.pid > 1]
+        program = process.name()
+        for parent in process.parents():
+            if parent.pid <= 1 or parent.name() != program:
+                break
+            tree.append((parent.pid, "gateway launcher"))
         for child in process.children(recursive=True):
             try:
                 if child.status() != psutil.STATUS_ZOMBIE:  # exited, unreaped: nothing to restart
@@ -122,8 +131,8 @@ def check_replaced_runtime(manual_issues: list[str]) -> None:
     if not other_findings and (gateway_pid is None or not gateway_findings and not can_inspect()):
         return  # nothing to report, or a platform that cannot tell what the gateway runs
     _section("Gateway Runtime")
-    if not gateway_findings and not other_findings:
-        return check_ok("Gateway runs the current interpreter")
+    if gateway_pid is not None and not gateway_findings and can_inspect():
+        check_ok("Gateway runs the current interpreter")
     for detail in (*gateway_findings.values(), *other_findings.values()):
         check_warn(detail)
     if gateway_findings:
