@@ -744,7 +744,10 @@ SCRATCH_DIR_MARKER_ENV = "HERMES_SCRATCH_DIR"
 SCRATCH_MAX_IDLE_HOURS = 24
 _SCRATCH_PRUNE_STAMP = ".last_prune"
 _SCRATCH_PRUNE_INTERVAL_SECONDS = 3600
-_scratch_pruned_once = False
+# Scratch dirs this process has already offered a prune pass to. Keyed per dir, not a single
+# flag: one long-lived backend serves every profile, and a process-wide flag let only the
+# first profile's scratch ever be pruned (the others grew for weeks).
+_scratch_pruned_dirs: set[str] = set()
 
 # AF_UNIX socket paths cap at 104 bytes (macOS) / 108 (Linux). Chrome appends
 # ``com.google.Chrome.XXXXXX/SingletonSocket`` (~45) and the code kernel
@@ -926,10 +929,10 @@ def prune_scratch_dir(scratch: Path | None = None, max_idle_hours: float = SCRAT
 
 
 def _prune_scratch_dir_once(scratch: Path) -> None:
-    global _scratch_pruned_once
-    if _scratch_pruned_once:
+    key = os.path.realpath(scratch)
+    if key in _scratch_pruned_dirs:
         return
-    _scratch_pruned_once = True
+    _scratch_pruned_dirs.add(key)
     import time
     stamp = scratch / _SCRATCH_PRUNE_STAMP
     try:

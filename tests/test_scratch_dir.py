@@ -284,3 +284,35 @@ def test_prune_releases_git_worktree_registration_of_idle_entry(tmp_path):
     listing = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=repo, capture_output=True,
                              text=True, stdin=subprocess.DEVNULL, check=True).stdout
     assert str(tree) not in listing and not tree.exists()
+
+
+def test_one_process_prunes_each_profiles_scratch(tmp_path, monkeypatch):
+    """One long-lived backend serves every profile: after it prunes the first profile's scratch,
+    a second profile's scratch must still get its own pass (a process-wide flag skipped it forever)."""
+    import hermes_constants as constants
+
+    monkeypatch.setattr(constants, "_scratch_pruned_dirs", set())
+    old = time.time() - 48 * 3600
+    stale = []
+    for name in ("default", "aetna"):
+        scratch = get_scratch_dir(tmp_path / name, prune=False)
+        entry = scratch / "case_old"
+        entry.mkdir()
+        (entry / "f").write_text("x", encoding="utf-8")
+        for p in (entry / "f", entry):
+            os.utime(p, (old, old))
+        stale.append(entry)
+
+    get_scratch_dir(tmp_path / "default")
+    get_scratch_dir(tmp_path / "aetna")
+    deadline = time.time() + 20  # the pass may run detached
+    while time.time() < deadline and any(e.exists() for e in stale):
+        time.sleep(0.2)
+    assert not stale[0].exists()
+    assert not stale[1].exists()
+
+    # Still once per dir per process: a second call does not start another pass.
+    calls = []
+    monkeypatch.setattr(constants, "prune_scratch_dir", lambda *a, **k: calls.append(a) or 0)
+    get_scratch_dir(tmp_path / "aetna")
+    assert calls == []
