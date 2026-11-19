@@ -552,8 +552,12 @@ def _gc_store(store, facts) -> tuple[int, int]:
                 continue
             if item.name in keep:
                 continue
-            if executing_holders(item) != []:
+            holders = executing_holders(item)
+            if holders:
                 print(f"keeping {item.name}: a running process still executes from it")
+                continue
+            if holders is None:
+                print(f"keeping {item.name}: could not check whether a running process uses it")
                 continue
             print(f"removing {item.name}")
             shutil.rmtree(item, ignore_errors=True)

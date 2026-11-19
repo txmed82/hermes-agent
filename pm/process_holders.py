@@ -132,8 +132,9 @@ def executable_state(pid: int) -> tuple[str | None, bool] | None:
 def fold_path(path: str) -> str:
     """``path`` in the form the holder comparison uses (case-folded on macOS)."""
     path = os.path.normcase(path)
-    # APFS defaults to case-insensitive and libproc reports the opener's spelling; folding on a
-    # case-sensitive volume can only over-report a holder, which keeps a tree, never loses one.
+    # APFS defaults to case-insensitive, so a caller's spelling of the tree need not match the
+    # kernel's; folding on a case-sensitive volume can only over-report a holder, which keeps a
+    # tree, never loses one.
     return path.casefold() if sys.platform == "darwin" else path
 
 
@@ -157,6 +158,8 @@ def executable_holders(tree: Path) -> list[int]:
     holders = []
     for pid in list_pids():
         path, unlinked = executable(pid)
+        # Both kernels name the executable's vnode, not the launcher's argv: a process started
+        # through a symlinked ~/.hermes or HERMES_RUNTIME_DIR reports the resolved path.
         if path is not None and not unlinked and _inside(path, roots):
             holders.append(pid)
     return holders

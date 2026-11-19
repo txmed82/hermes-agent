@@ -69,6 +69,19 @@ def test_set_aside_tree_matches_a_differently_cased_spelling(store):
 
 
 @pytest.mark.platforms("linux", "macos")
+def test_flags_a_gateway_launched_through_a_symlinked_store(store, tmp_path, monkeypatch, capsys):
+    (tmp_path / "linked").symlink_to(store, target_is_directory=True)
+    with running_from(tmp_path / "linked" / "python-1") as process:
+        (store / "python-1").rename(store / ".previous-python-1")
+        _gateway(monkeypatch, process.pid)
+        issues: list[str] = []
+        doctor.check_replaced_runtime(issues)
+
+    assert f"gateway PID {process.pid} runs a replaced toolchain" in capsys.readouterr().out
+    assert len(issues) == 1
+
+
+@pytest.mark.platforms("linux", "macos")
 def test_flags_other_processes_still_running_a_set_aside_toolchain(store, monkeypatch, capsys):
     import gateway.status
 

@@ -55,6 +55,16 @@ def test_holders_follow_a_rename_and_lose_an_unlinked_executable(tmp_path):
 
 
 @pytest.mark.platforms("linux", "macos")
+def test_holders_include_a_process_launched_through_a_symlinked_store(tmp_path):
+    # The kernel names the executable's vnode, so the resolved tree matches.
+    real = tmp_path / "real-store"
+    real.mkdir()
+    (tmp_path / "linked-store").symlink_to(real, target_is_directory=True)
+    with running_from(tmp_path / "linked-store" / "tool-1") as process:
+        assert process_holders.executable_holders(real / "tool-1") == [process.pid]
+
+
+@pytest.mark.platforms("linux", "macos")
 def test_publish_keeps_the_replaced_tree_while_a_process_executes_it(tmp_path):
     store = Store(tmp_path / "store")
     entry = store.entry("tool-1")

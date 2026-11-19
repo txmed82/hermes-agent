@@ -37,8 +37,9 @@ def _store_roots() -> list[Path]:
 def _set_aside_tree(executable: str, roots: list[Path]) -> Path | None:
     """The set-aside store tree ``executable`` lies in, or None.
 
-    Compared the way ``pm.process_holders`` compares (case-folded on macOS): libproc reports the
-    launcher's spelling of the path, which need not match the store root's.
+    Compared the way ``pm.process_holders`` compares (case-folded on macOS). ``executable`` is the
+    kernel's name for the process executable, which already has symlinks resolved, as do
+    ``roots``.
     """
     from pm.process_holders import fold_path
 
