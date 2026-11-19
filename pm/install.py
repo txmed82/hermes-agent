@@ -252,7 +252,26 @@ def _remove_entry(store: Store, entry_name: str, *, attempts: int = 5) -> None:
 _SET_ASIDE_PREFIX = ".reclaim-"
 
 
-def _discard_entry(store: Store, entry_name: str) -> None:
+def executing_holders(tree: Path) -> list[int] | None:
+    """PIDs of live processes executing a binary from ``tree``; None when that cannot be read.
+
+    POSIX deletes such a tree without complaint and the process runs on unlinked inodes; on macOS
+    every later privacy (TCC) check of its responsibility chain then fails, because tccd cannot
+    name its executable (see ``pm.process_holders``). Callers keep the tree on None.
+    """
+    from pm.process_holders import executable_holders
+
+    if tree.is_symlink() or not tree.is_dir():
+        return []
+    try:
+        return executable_holders(tree)
+    except OSError as exc:
+        LOG.warning("cannot tell whether a running process executes from %s (%s); keeping it",
+                    tree.name, exc)
+        return None
+
+
+def _discard_entry(store: Store, entry_name: str, *, executable: bool = True) -> None:
     """Drop a tree a finished publish or restore left behind as garbage.
 
     A running Hermes process can keep the replaced interpreter's DLLs mapped
@@ -261,27 +280,67 @@ def _discard_entry(store: Store, entry_name: str) -> None:
     images, so it moves to a `.reclaim-*` name: its slot is free for the next
     publish, no restore ever picks it up, and the next install or
     `hermes pm gc` deletes it once the hold is gone.
+
+    POSIX deletes a tree a live process executes from without complaint, so a
+    tree that may hold executables moves to its `.reclaim-*` name first and is
+    checked for executing holders under that name: a launcher can still exec
+    the old name between a check and the delete, but nothing execs a fresh
+    random name. A fetched archive (``executable=False``) is never run in place
+    and is removed directly.
     """
     import uuid
 
+    fresh = f"{_SET_ASIDE_PREFIX}{uuid.uuid4().hex}"
+    current = entry_name  # where the tree sits now
+    if executable:
+        try:
+            retry_held(lambda: store.entry(entry_name).rename(store.entry(fresh)))
+            current = fresh
+        except FileNotFoundError:
+            return
+        except OSError:
+            # Still check under the old name: the exec race is narrow, deleting a tree a process
+            # already executes from is the failure this guards against. A held `.previous-*`
+            # tree left here is settled by the next install of its entry.
+            pass
+        holders = executing_holders(store.entry(current))
+        if holders:
+            return _report_set_aside(
+                entry_name, current,
+                f"{'PIDs' if len(holders) > 1 else 'PID'} {', '.join(map(str, holders))} still "
+                "executing from it; restart them (for the gateway: `hermes gateway restart`) "
+                "to run the replacement")
+        if holders is None:
+            return _report_set_aside(entry_name, current, "its running processes could not be checked")
     try:
-        _remove_entry(store, entry_name)
+        _remove_entry(store, current)
         return
     except OSError as e:
-        error = e
-    try:
-        store.entry(entry_name).rename(store.entry(f"{_SET_ASIDE_PREFIX}{uuid.uuid4().hex}"))
-    except OSError:
-        LOG.warning("could not remove or set aside %s: %s", entry_name, error)
-        return
-    LOG.warning("%s is still in use (%s); set aside for the next install or `hermes pm gc`",
-                entry_name, error)
+        reason = str(e)
+    if current == entry_name:
+        try:
+            store.entry(entry_name).rename(store.entry(fresh))
+            current = fresh
+        except OSError:
+            pass
+    _report_set_aside(entry_name, current, reason)
+
+
+def _report_set_aside(entry_name: str, current: str, reason: str) -> None:
+    """Log where a tree that could not be removed now sits (``current``)."""
+    if current == entry_name:
+        LOG.warning("could not remove or set aside %s: %s", entry_name, reason)
+    else:
+        LOG.warning("%s is still in use (%s); set aside for the next install or `hermes pm gc`",
+                    entry_name, reason)
 
 
 def _reclaim_set_aside(store: Store) -> int:
     """Delete set-aside trees whose hold is gone; the caller holds the store lock."""
     removed = 0
     for item in sorted(store.root.glob(f"{_SET_ASIDE_PREFIX}*")):
+        if executing_holders(item) != []:
+            continue
         try:
             _remove_entry(store, item.name, attempts=1)
         except OSError:
@@ -293,7 +352,7 @@ def _reclaim_set_aside(store: Store) -> int:
 def _remove_downloads(store: Store, artifacts: list[dict]) -> None:
     """Release this package's archives after publication, under its store lock."""
     for artifact in artifacts:
-        _discard_entry(store, f"fetch-{artifact['sha256']}")
+        _discard_entry(store, f"fetch-{artifact['sha256']}", executable=False)
 
 
 def _entry_verified(package: Package, fact: dict, store: Store, target: str) -> bool:
