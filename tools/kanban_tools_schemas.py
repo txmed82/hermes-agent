@@ -44,19 +44,42 @@ def _schema(name: str, description: str, properties: dict[str, Any], required: l
     }
 
 
+_DESC_SHOW_BEFORE = (
+    "Optional cursor: return only rows older than this id. Pass the previous "
+    "page's history.<kind>.next_before to read the next-older page exactly."
+)
+
 KANBAN_SHOW_SCHEMA = _schema(
     "kanban_show",
     (
-        "Read a task's full state: body, assignee, parent handoffs, attempts, comments. "
-        "It also carries the title and recent events. Use this to (re)orient yourself before "
-        "starting work, especially on retries. The response includes a "
-        "pre-formatted ``worker_context`` string suitable for inclusion "
-        "verbatim in your reasoning. Outside a dispatcher-spawned worker "
-        "there is no default task: a bare call returns a pointer to "
-        "``kanban_list`` instead of task state."
+        "Read a task's state: title, body, assignee, active owner, dependencies, "
+        "the latest comment from someone other than the assignee (operator "
+        "steering), and the most recent comments, runs (attempts) and events. "
+        "History is bounded by default (5 comments, 5 runs, 50 events); "
+        "``history`` reports each kind's real total, ``has_more`` and a "
+        "``next_before`` cursor for paging older rows exactly. Use this to "
+        "(re)orient yourself before starting work, especially on retries. The "
+        "response includes a pre-formatted ``worker_context`` string (compact by "
+        "default) suitable for inclusion verbatim in your reasoning. Outside a "
+        "dispatcher-spawned worker there is no default task: a bare call returns "
+        "a pointer to ``kanban_list`` instead of task state."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
+        "comment_limit": _prop("integer", "Newest comments to return (default 5, 0-200)."),
+        "comment_before": _prop("integer", _DESC_SHOW_BEFORE),
+        "run_limit": _prop("integer", "Newest runs/attempts to return (default 5, 0-100)."),
+        "run_before": _prop("integer", _DESC_SHOW_BEFORE),
+        "event_limit": _prop("integer", "Newest events to return (default 50, 0-200)."),
+        "event_before": _prop("integer", _DESC_SHOW_BEFORE),
+        "worker_context": {
+            "type": "string",
+            "enum": ["compact", "full", "none"],
+            "description": (
+                "worker_context rendering: 'compact' (default; short history tails, "
+                "latest steering, totals), 'full' (the spawn-time prompt text), or "
+                "'none' (omit)."),
+        },
     },
     [],
 )
