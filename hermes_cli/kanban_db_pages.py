@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import hermes_cli.kanban_db as _kb
 
-# table -> (row class name on the facade, id column). Paging is by rowid: ids are
+# kind -> (table name, row class on the kanban_db facade). Paging is by rowid: ids are
 # monotonic per insert, so a same-second burst is never split or skipped.
 _HISTORY_TABLES = {
     "comments": ("task_comments", "Comment"),
@@ -46,8 +46,7 @@ def page_history(
     ``before`` is None), returned oldest-first like the unbounded lists."""
     table, cls_name = _HISTORY_TABLES[kind]
     row_cls = getattr(_kb, cls_name)
-    total = int(conn.execute(
-        f"SELECT COUNT(*) FROM {table} WHERE task_id = ?", (task_id,)).fetchone()[0])
+    total = history_total(conn, task_id, kind)
     where, params = "task_id = ?", list[Any]([task_id])
     if before is not None:
         where += " AND id < ?"
@@ -76,19 +75,33 @@ def _max_id(conn: sqlite3.Connection, table: str, task_id: str) -> int:
         f"SELECT MAX(id) FROM {table} WHERE task_id = ?", (task_id,)).fetchone()[0])
 
 
-def latest_comment_where(
-    conn: sqlite3.Connection, task_id: str, keep: Callable[[Any], bool],
+def latest_comment_not_by(
+    conn: sqlite3.Connection, task_id: str, author: Optional[str],
 ) -> Optional[Any]:
-    """Newest comment passing ``keep``, scanning newest-first in bounded batches."""
-    before: Optional[int] = None
-    while True:
-        page = page_history(conn, task_id, "comments", limit=200, before=before)
-        for comment in reversed(page.items):
-            if keep(comment):
-                return comment
-        if page.next_before is None:
-            return None
-        before = page.next_before
+    """Newest comment whose author differs from ``author`` (one indexed query)."""
+    row = conn.execute(
+        "SELECT * FROM task_comments WHERE task_id = ? AND COALESCE(author, '') != COALESCE(?, '') "
+        "ORDER BY id DESC LIMIT 1", (task_id, author)).fetchone()
+    return _kb.Comment.from_row(row) if row is not None else None
+
+
+def closed_runs_tail(conn: sqlite3.Connection, task_id: str, limit: int) -> tuple[list[Any], int]:
+    """The newest ``limit`` ended runs (oldest-first) and the exact count of ended runs."""
+    total = int(conn.execute(
+        "SELECT COUNT(*) FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL",
+        (task_id,)).fetchone()[0])
+    rows = conn.execute(
+        "SELECT * FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL "
+        "ORDER BY started_at DESC, id DESC LIMIT ?",  # list_runs order, reversed
+        (task_id, int(limit))).fetchall() if limit > 0 else []
+    return [_kb.Run.from_row(r) for r in reversed(rows)], total
+
+
+def history_total(conn: sqlite3.Connection, task_id: str, kind: str) -> int:
+    """Exact row count of ``kind`` on the task."""
+    table = _HISTORY_TABLES[kind][0]
+    return int(conn.execute(
+        f"SELECT COUNT(*) FROM {table} WHERE task_id = ?", (task_id,)).fetchone()[0])
 
 
 def comment_author_counts(conn: sqlite3.Connection, task_id: str) -> list[dict[str, Any]]:

@@ -53,8 +53,12 @@ KANBAN_SHOW_SCHEMA = _schema(
     "kanban_show",
     (
         "Read a task's state: title, body, assignee, active owner, dependencies, "
-        "the latest comment from someone other than the assignee (operator "
-        "steering), and the most recent comments, runs (attempts) and events. "
+        "the newest comment by someone other than the assignee "
+        "(``latest_non_assignee_comment``; the author is not verified and may be "
+        "an operator or another worker, so weigh it by ``author``), and the most "
+        "recent comments, runs (attempts) and events. A comment body longer than "
+        "``comment_body_limit`` chars (default 4096) keeps its first that many chars "
+        "plus a truncation marker and carries ``body_truncated`` and ``body_chars``. "
         "History is bounded by default (5 comments, 5 runs, 50 events); "
         "``history`` reports each kind's real total, ``has_more`` and a "
         "``next_before`` cursor for paging older rows exactly. Use this to "
@@ -72,12 +76,18 @@ KANBAN_SHOW_SCHEMA = _schema(
         "run_before": _prop("integer", _DESC_SHOW_BEFORE),
         "event_limit": _prop("integer", "Newest events to return (default 50, 0-200)."),
         "event_before": _prop("integer", _DESC_SHOW_BEFORE),
+        "comment_body_limit": _prop(
+            "integer",
+            "Chars of each comment body to keep before a truncation marker (default 4096, "
+            "1-1000000). To read one capped "
+            "comment in full: comment_before=<its id + 1>, comment_limit=1, "
+            "comment_body_limit=<its body_chars>."),
         "worker_context": {
             "type": "string",
             "enum": ["compact", "full", "none"],
             "description": (
                 "worker_context rendering: 'compact' (default; short history tails, "
-                "latest steering, totals), 'full' (the spawn-time prompt text), or "
+                "newest non-assignee comment, totals), 'full' (the spawn-time prompt text), or "
                 "'none' (omit)."),
         },
     },

@@ -672,6 +672,11 @@ _SHOW_WORKER_CONTEXT_MODES = ("compact", "full", "none")
 _ACTIVE_RUN_FIELDS = tuple(
     "id profile status step_key started_at last_heartbeat_at max_runtime_seconds".split())
 _SHOW_MAX_COMMENT_AUTHORS = 20
+# Per-comment body cap in the JSON payload (chars), so a few huge comments cannot defeat the
+# row bound. A capped body says so; one comment reads in full with comment_before=<id + 1>,
+# comment_limit=1, comment_body_limit=<its body_chars>.
+_SHOW_COMMENT_BODY_DEFAULT = 4096
+_SHOW_COMMENT_BODY_MAX = 1_000_000
 
 
 def _show_int(args: dict, name: str, default: Optional[int], lo: int, hi: Optional[int]) -> Optional[int]:
@@ -704,21 +709,32 @@ def _active_owner(kb, conn, task) -> dict[str, Any]:
             "run": _fields(run, _ACTIVE_RUN_FIELDS) if run is not None else None}
 
 
-def _steering(conn, task) -> dict[str, Any]:
-    """Newest comment by anyone but the assignee, wherever it sits in the thread,
-    plus per-author counts so a long monitor/self-comment run cannot bury it."""
-    from hermes_cli.kanban_db_pages import comment_author_counts, latest_comment_where
-    steer = latest_comment_where(conn, task.id, lambda c: (c.author or "") != (task.assignee or ""))
+def _show_comment(c, body_limit: int) -> dict[str, Any]:
+    out = _fields(c, ("id", *_COMMENT_FIELDS))
+    body = out.get("body") or ""
+    if len(body) > body_limit:
+        out["body"] = body[:body_limit] + f"… [truncated, {len(body) - body_limit} chars omitted]"
+        out["body_truncated"] = True
+        out["body_chars"] = len(body)
+    return out
+
+
+def _steering(conn, task, body_limit: int) -> dict[str, Any]:
+    """Newest comment by anyone but the assignee, wherever it sits in the thread, plus
+    per-author counts so a long monitor/self-comment run cannot bury it. The author is
+    not verified (an operator or another worker's handoff), so the key says only that."""
+    from hermes_cli.kanban_db_pages import comment_author_counts, latest_comment_not_by
+    other = latest_comment_not_by(conn, task.id, task.assignee)
     authors = comment_author_counts(conn, task.id)
     return {
-        "latest_steering": _fields(steer, ("id", *_COMMENT_FIELDS)) if steer is not None else None,
+        "latest_non_assignee_comment": _show_comment(other, body_limit) if other is not None else None,
         "comment_authors": authors[:_SHOW_MAX_COMMENT_AUTHORS],
         "comment_author_count": len(authors)}
 
 
 @_kanban_handler("kanban_show")
 def _handle_show(args: dict, **kw) -> str:
-    """Task state: row, dependencies, active owner, latest steering, and bounded,
+    """Task state: row, dependencies, active owner, newest non-assignee comment, and bounded,
     cursor-paged comments/runs/events (``history`` holds the exact counts)."""
     tid = _default_task_id(args.get("task_id"))
     if not tid:
@@ -738,6 +754,8 @@ def _handle_show(args: dict, **kw) -> str:
     with _board(args.get("board")) as (kb, conn):
         task = _existing_task(kb, conn, tid)
         pages = _show_pages(args, conn, tid)
+        body_limit = _show_int(args, "comment_body_limit", _SHOW_COMMENT_BODY_DEFAULT, 1,
+                               _SHOW_COMMENT_BODY_MAX)
         return json.dumps({
             "task": _fields(task, _TASK_FIELDS),
             "active_owner": _active_owner(kb, conn, task),
@@ -747,8 +765,8 @@ def _handle_show(args: dict, **kw) -> str:
             "unsatisfied_parents": [
                 {"id": pid, "status": status} for pid, status in kb.unsatisfied_parents(conn, tid)],
             "children": kb.child_ids(conn, tid),
-            **_steering(conn, task),
-            "comments": [_fields(c, ("id", *_COMMENT_FIELDS)) for c in pages["comments"].items],
+            **_steering(conn, task, body_limit),
+            "comments": [_show_comment(c, body_limit) for c in pages["comments"].items],
             "events": [_fields(e, ("id", *_EVENT_FIELDS)) for e in pages["events"].items],
             "runs": [_fields(r, _RUN_FIELDS) for r in pages["runs"].items],
             "history": {kind: page.meta() for kind, page in pages.items()},

@@ -3,8 +3,8 @@
 A real research card reached ~540 comments / 35 runs and a bare ``kanban_show()``
 returned ~1 MB. The contract: the bare call is bounded, every page states the real
 DB totals with an exact cursor (nothing silently hidden, all older rows reachable),
-and the body, dependencies, active owner and latest operator steering survive
-however much self-commentary buried them. Synthetic fixture only.
+and the body, dependencies, active owner and the newest non-assignee comment
+survive however much self-commentary buried them. Synthetic fixture only.
 """
 import json
 
@@ -123,8 +123,9 @@ def test_body_dependencies_owner_and_buried_steering_survive(long_card):
     assert owner["run"]["id"] == long_card["run_id"] and owner["run"]["profile"] == ASSIGNEE
     assert set(owner["run"]) == {"id", "profile", "status", "step_key", "started_at",
                                  "last_heartbeat_at", "max_runtime_seconds"}
-    assert out["latest_steering"]["body"] == STEER
-    assert out["latest_steering"]["author"] == "operator"
+    assert "latest_steering" not in out  # the author is unverified; the key claims no authority
+    assert out["latest_non_assignee_comment"]["body"] == STEER
+    assert out["latest_non_assignee_comment"]["author"] == "operator"
     assert STEER not in [c["body"] for c in out["comments"]]  # buried, yet retained above
     authors = {a["author"]: a["count"] for a in out["comment_authors"]}
     assert authors == {"operator": 2, ASSIGNEE: 300}
@@ -132,7 +133,51 @@ def test_body_dependencies_owner_and_buried_steering_survive(long_card):
     ctx = out["worker_context"]
     assert STEER in ctx and BODY in ctx
     assert "302 comment(s) and 35 run(s) in total" in ctx
-    assert "omitted; showing most recent" in ctx
+    assert "_(297 earlier comments omitted; showing most recent 5)_" in ctx
+    assert "author unverified: operator or another worker" in ctx
+    assert "operator steering" not in ctx
+
+
+def test_compact_context_reads_only_the_newest_pages(long_card, monkeypatch):
+    from hermes_cli import kanban_db as kb
+    real_comments, real_runs = kb.list_comments, kb.list_runs
+
+    def _guard(real):
+        def call(conn, task_id, *a, **k):
+            if task_id == long_card["tid"]:
+                raise AssertionError("compact rendering must not load this card's whole history")
+            return real(conn, task_id, *a, **k)
+        return call
+
+    monkeypatch.setattr(kb, "list_comments", _guard(real_comments))
+    monkeypatch.setattr(kb, "list_runs", _guard(real_runs))
+    _, out = _show()
+    ctx = out["worker_context"]
+    assert ctx.count("comment from worker `researcher`") == 5
+    assert "_(31 earlier attempts omitted; showing most recent 3)_" in ctx
+    assert "### Attempt 32 — reclaimed" in ctx and "### Attempt 34 — reclaimed" in ctx
+    assert "### Attempt 31 " not in ctx
+
+
+def test_huge_comment_bodies_are_capped_and_still_readable_in_full(long_card):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    huge = "H" * 300_000
+    with kbc.connect_closing() as conn:
+        cid = kb.add_comment(conn, long_card["tid"], "sibling-worker", huge)
+        conn.commit()
+    raw, out = _show()
+    assert len(raw.encode()) < 64 * 1024, len(raw.encode())
+    newest = out["comments"][-1]
+    assert newest["id"] == cid and newest["body_truncated"] is True
+    assert newest["body_chars"] == len(huge)
+    assert newest["body"].startswith("H" * 4096)
+    assert newest["body"].endswith(f"… [truncated, {len(huge) - 4096} chars omitted]")
+    other = out["latest_non_assignee_comment"]
+    assert other["id"] == cid and other["author"] == "sibling-worker" and other["body_truncated"]
+    _, one = _show(comment_before=cid + 1, comment_limit=1,
+                   comment_body_limit=newest["body_chars"], worker_context="none")
+    assert one["comments"][0]["body"] == huge and "body_truncated" not in one["comments"][0]
 
 
 def test_full_worker_context_is_the_unchanged_spawn_time_string(long_card):
@@ -156,6 +201,7 @@ def test_full_worker_context_is_the_unchanged_spawn_time_string(long_card):
     ({"run_limit": 101}, "run_limit must be <= 100"),
     ({"event_before": "x"}, "event_before must be an integer"),
     ({"worker_context": "everything"}, "worker_context must be one of"),
+    ({"comment_body_limit": 0}, "comment_body_limit must be >= 1"),
 ])
 def test_bad_bounds_are_rejected(long_card, args, needle):
     _, out = _show(**args)
