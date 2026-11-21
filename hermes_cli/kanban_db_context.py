@@ -37,7 +37,8 @@ class _CtxCaps:
 
 
 # Spawn-time prompt (unchanged) vs the ``kanban_show`` orientation default: the body keeps its
-# full cap in both; only history tails shrink, and every omission is stated in the text.
+# full cap in both; compact shortens the history tails and the per-field/per-comment caps, and
+# every omission is stated in the text.
 _FULL_CAPS = _CtxCaps()
 _COMPACT_CAPS = _CtxCaps(prior_attempts=3, comments=5, field_bytes=1024, comment_bytes=1024)
 
@@ -88,15 +89,19 @@ def _ctx_metadata_line(metadata: Any, limit: int = _CTX_MAX_FIELD_BYTES) -> Opti
         return None
 
 
+def _ctx_omitted_note(omitted: int, shown: int, noun: str) -> Optional[str]:
+    if omitted <= 0:
+        return None
+    return (f"_({omitted} earlier {noun}{'s' if omitted != 1 else ''} "
+            f"omitted; showing most recent {shown})_")
+
+
 def _ctx_tail(items: list, cap: int, noun: str) -> tuple[list, Optional[str]]:
     """Keep the newest ``cap`` items; describe the omitted head, if any."""
     omitted = max(0, len(items) - cap)
     if not omitted:
         return items, None
-    return items[-cap:], (
-        f"_({omitted} earlier {noun}{'s' if omitted != 1 else ''} "
-        f"omitted; showing most recent {cap})_"
-    )
+    return items[-cap:], _ctx_omitted_note(omitted, cap, noun)
 
 
 def _ctx_header(lines: list[str], task: Task) -> None:
@@ -152,7 +157,7 @@ def _ctx_prior_attempts(
     if compact:
         from hermes_cli.kanban_db_pages import closed_runs_tail
         shown, total = closed_runs_tail(conn, task_id, caps.prior_attempts)
-        _, omitted_note = _ctx_tail([None] * total, caps.prior_attempts, "attempt")
+        omitted_note = _ctx_omitted_note(total - len(shown), len(shown), "attempt")
     else:
         all_prior = [r for r in _kb.list_runs(conn, task_id) if r.ended_at is not None]
         total = len(all_prior)
@@ -256,11 +261,8 @@ def _ctx_comments(
     if total is None:
         shown, omitted_note = _ctx_tail(comments, caps.comments, "comment")
     else:
-        shown, omitted_note = _ctx_tail(comments, caps.comments, "comment")
-        omitted = total - len(shown)
-        if omitted > 0:
-            omitted_note = (f"_({omitted} earlier comment{'s' if omitted != 1 else ''} "
-                            f"omitted; showing most recent {len(shown)})_")
+        shown = comments
+        omitted_note = _ctx_omitted_note(total - len(shown), len(shown), "comment")
     if not shown:
         return
     lines.append("## Comment thread")
