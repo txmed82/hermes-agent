@@ -88,7 +88,7 @@ KANBAN_SHOW_SCHEMA = _schema(
             "description": (
                 "worker_context rendering: 'compact' (default; short history tails, "
                 "newest non-assignee comment, totals), 'full' (the spawn-time prompt text), or "
-                "'none' (omit)."),
+                "'none' (worker_context is null)."),
         },
     },
     [],

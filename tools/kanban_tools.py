@@ -668,6 +668,7 @@ _SHOW_PAGES = {
     "events": ("event_limit", "event_before", 50, 200),
 }
 _SHOW_WORKER_CONTEXT_MODES = ("compact", "full", "none")
+_SQLITE_MAX_INT = 2**63 - 1  # largest id a cursor can name
 # The active run as explicit scalars only: never claim locks, pids, metadata or env.
 _ACTIVE_RUN_FIELDS = tuple(
     "id profile status step_key started_at last_heartbeat_at max_runtime_seconds".split())
@@ -700,7 +701,7 @@ def _show_pages(args: dict, conn, tid: str) -> dict[str, Any]:
     for kind, (limit_arg, before_arg, default, hi) in _SHOW_PAGES.items():
         pages[kind] = page_history(
             conn, tid, kind, limit=_show_int(args, limit_arg, default, 0, hi),
-            before=_show_int(args, before_arg, None, 1, None))
+            before=_show_int(args, before_arg, None, 1, _SQLITE_MAX_INT))
     return pages
 
 
@@ -750,7 +751,8 @@ def _handle_show(args: dict, **kw) -> str:
                 "task to show by default. Call kanban_list to see task ids on "
                 "the board, then kanban_show(task_id=<id>) for full state."),
         })
-    mode = args.get("worker_context") or "compact"
+    mode = args.get("worker_context")
+    mode = "compact" if mode is None else mode
     _check(mode in _SHOW_WORKER_CONTEXT_MODES,
            f"worker_context must be one of {', '.join(_SHOW_WORKER_CONTEXT_MODES)}")
     with _board(args.get("board")) as (kb, conn):
