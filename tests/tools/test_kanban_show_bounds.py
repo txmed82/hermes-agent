@@ -202,6 +202,8 @@ def test_full_worker_context_is_the_unchanged_spawn_time_string(long_card):
     ({"event_before": "x"}, "event_before must be an integer"),
     ({"worker_context": "everything"}, "worker_context must be one of"),
     ({"comment_body_limit": 0}, "comment_body_limit must be >= 1"),
+    ({"comment_limit": 2.5}, "comment_limit must be an integer"),
+    ({"run_limit": True}, "run_limit must be an integer"),
 ])
 def test_bad_bounds_are_rejected(long_card, args, needle):
     _, out = _show(**args)

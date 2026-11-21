@@ -298,7 +298,8 @@ def _ctx_compact_history(
     runs_total = history_total(conn, task.id, "runs")
     lines.append("## History bounds")
     lines.append(
-        f"_Compact view: this task has {tail.total} comment(s) and {runs_total} run(s) in total. "
+        f"_Compact view: this task has {tail.total} comment(s) and {runs_total} run(s) in total "
+        "(runs include any active one; prior attempts count closed runs only). "
         "Older rows are omitted here, not lost: page them exactly with kanban_show "
         "comment_before / run_before / event_before cursors, or request worker_context=\"full\"._")
     lines.append("")

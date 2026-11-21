@@ -683,6 +683,8 @@ def _show_int(args: dict, name: str, default: Optional[int], lo: int, hi: Option
     value = args.get(name)
     if value is None:
         return default
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        raise _Reject(f"{name} must be an integer")
     try:
         value = int(value)
     except (TypeError, ValueError):
