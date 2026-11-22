@@ -141,6 +141,20 @@ def test_grep_pruned_lane_leading_hyphen(tmp_path, monkeypatch):
     assert result.total_count == 2
 
 
+@pytest.mark.parametrize("mode", ["content", "files_only", "count"])
+def test_grep_pruned_lane_dash_root_spelled_as_given(tmp_path, monkeypatch, mode):
+    hidden = tmp_path / ".cache" / "proj"
+    (hidden / "-logs").mkdir(parents=True)
+    (hidden / "-logs" / "run.log").write_text("  --image FILE\n")
+    ops = _ops(hidden, monkeypatch, "grep")
+    assert ops._root_under_hidden_dir("-logs")
+    result = ops.search("--image", path="-logs", output_mode=mode)
+    assert result.error is None, result.error
+    paths = {"content": [m.path for m in result.matches], "files_only": result.files,
+             "count": list(result.counts)}[mode]
+    assert paths == ["-logs/run.log"]
+
+
 @pytest.mark.parametrize("native", [True, False])
 def test_zero_match_probe_handles_leading_hyphen(tree, monkeypatch, native):
     # Exact-case search misses; the case-insensitive probe must still run (not
@@ -169,4 +183,6 @@ def test_find_fallback_file_search_leading_hyphen(tree, monkeypatch):
     ops = _ops(tree, monkeypatch, "grep")
     result = ops.search("--nested*", path="-logs", target="files")
     assert result.error is None, result.error
-    assert [f.rsplit("/", 1)[-1] for f in result.files] == ["--nested-dir"]
+    # The find-only lane keeps its existing ./-anchored spelling (see
+    # test_search_budget_truncation::test_find_dash_prefixed_relative_root_is_an_explicit_operand).
+    assert result.files == ["./-logs/--nested-dir"]

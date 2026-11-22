@@ -503,6 +503,16 @@ def _find_operand(root: str) -> str:
     return f"./{root}" if root.startswith("-") else root
 
 
+def _unanchor_find_path(entry: str, roots: list[str]) -> str:
+    """Undo ``_find_operand`` on a path find (or ``find -exec grep``) printed, so a
+    dash-prefixed root comes back spelled as given (``-logs/x``), the way rg prints it."""
+    for root in roots:
+        anchored = _find_operand(root)
+        if anchored != root and (entry == anchored or entry.startswith(f"{anchored}/")):
+            return entry[2:]
+    return entry
+
+
 def _posix_roots(roots: list[str]) -> bool:
     """Darwin-only: every root is POSIX-shaped (no drive letter / backslash)."""
     return sys.platform == "darwin" and all(
@@ -1043,8 +1053,7 @@ class SearchMixin:
 
         # find has no ``--`` for start points: anchor a dash-prefixed root with ``./``
         # and strip that anchor again so entries match rg's spelling of the root.
-        anchored = _find_operand(path)
-        escaped_path = self._escape_shell_arg(anchored)
+        escaped_path = self._escape_shell_arg(_find_operand(path))
         escaped_pattern = self._escape_shell_arg(pattern)
         q_roots = [escaped_path]
         hidden_prune = self._hidden_prune_expr(q_roots)
@@ -1074,8 +1083,7 @@ class SearchMixin:
                 dirs.append(parts[1])
             else:
                 dirs.append(line)
-        if anchored != path:
-            dirs = [d.removeprefix("./") for d in dirs]
+        dirs = [_unanchor_find_path(d, [path]) for d in dirs]
 
         if dirs:
             # An explicitly selected hidden root keeps its (hidden) subtree;
@@ -1129,7 +1137,10 @@ class SearchMixin:
 
         # Prune hidden descendant dirs (and hidden files, matching rg's default) while
         # still allowing an explicitly selected hidden root; dash-prefixed roots get
-        # ``./`` so find doesn't parse them as options.
+        # ``./`` so find doesn't parse them as options. This lane answers alone, so it
+        # keeps find's ``./-root/...`` spelling (safe to hand back to any tool as an
+        # argument); the directory supplement and the grep pruned lane unanchor theirs
+        # because rg/grep output in the same contract spells the root as given.
         find_roots = [_find_operand(root) for root in roots]
         q_roots = [self._escape_shell_arg(root) for root in find_roots]
         hidden_prune = f" {self._hidden_prune_expr(q_roots)} -o"
@@ -1448,4 +1459,12 @@ class SearchMixin:
         # ``Permission denied`` lines must reach the parser so an unreadable
         # subtree beside a readable match is reported, not silently dropped.
         find_parts.extend(["-exec", *grep_parts, "{}", "+"])
-        return self._run_search_pipeline(find_parts, output_mode, limit, offset, context, line_cap=True)
+        result = self._run_search_pipeline(find_parts, output_mode, limit, offset, context, line_cap=True)
+        if path and _find_operand(path) != path:
+            # Report a dash-prefixed root as given (``-logs/x``), as the other lanes do.
+            roots = [path]
+            result.files = [_unanchor_find_path(f, roots) for f in result.files]
+            result.counts = {_unanchor_find_path(f, roots): n for f, n in result.counts.items()}
+            for match in result.matches:
+                match.path = _unanchor_find_path(match.path, roots)
+        return result
