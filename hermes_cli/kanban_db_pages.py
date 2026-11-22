@@ -97,6 +97,15 @@ def closed_runs_tail(conn: sqlite3.Connection, task_id: str, limit: int) -> tupl
     return [_kb.Run.from_row(r) for r in reversed(rows)], total
 
 
+def newest_completed_run(conn: sqlite3.Connection, task_id: str) -> Optional[Any]:
+    """The run ``outcome='completed'`` with the latest ``started_at`` (lowest id on a tie,
+    matching a stable newest-first sort of :func:`list_runs`), in one query."""
+    row = conn.execute(
+        "SELECT * FROM task_runs WHERE task_id = ? AND outcome = 'completed' "
+        "ORDER BY started_at DESC, id ASC LIMIT 1", (task_id,)).fetchone()
+    return _kb.Run.from_row(row) if row is not None else None
+
+
 def history_total(conn: sqlite3.Connection, task_id: str, kind: str) -> int:
     """Exact row count of ``kind`` on the task."""
     table = _HISTORY_TABLES[kind][0]

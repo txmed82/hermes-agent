@@ -678,6 +678,12 @@ _SHOW_MAX_COMMENT_AUTHORS = 20
 # comment_limit=1, comment_body_limit=<its body_chars>.
 _SHOW_COMMENT_BODY_DEFAULT = 4096
 _SHOW_COMMENT_BODY_MAX = 1_000_000
+# Serialized size budget per history page (JSON chars == bytes, ASCII-escaped). The row
+# limits and body cap alone multiply out to hundreds of MB, so a page that would exceed this
+# keeps its newest rows that fit (always at least one) and moves ``next_before`` to the
+# oldest kept row: the dropped rows stay reachable by paging, and ``trimmed_for_budget``
+# says how many were moved to the next page.
+_SHOW_PAGE_BUDGET_CHARS = 256_000
 
 
 def _show_int(args: dict, name: str, default: Optional[int], lo: int, hi: Optional[int]) -> Optional[int]:
@@ -703,6 +709,24 @@ def _show_pages(args: dict, conn, tid: str) -> dict[str, Any]:
             conn, tid, kind, limit=_show_int(args, limit_arg, default, 0, hi),
             before=_show_int(args, before_arg, None, 1, _SQLITE_MAX_INT))
     return pages
+
+
+def _fit_page(page, rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Keep the newest ``rows`` whose JSON fits ``_SHOW_PAGE_BUDGET_CHARS`` (at least one)."""
+    meta = page.meta()
+    used, keep = 0, 0
+    for row in reversed(rows):  # rows are oldest -> newest
+        size = len(json.dumps(row)) + 2  # ", " separator
+        if keep and used + size > _SHOW_PAGE_BUDGET_CHARS:
+            break
+        used, keep = used + size, keep + 1
+    dropped = len(rows) - keep
+    meta["trimmed_for_budget"] = dropped
+    if dropped:
+        rows = rows[dropped:]
+        meta.update(returned=len(rows), older_count=page.older_count + dropped,
+                    has_more=True, next_before=int(rows[0]["id"]))
+    return rows, meta
 
 
 def _active_owner(kb, conn, task) -> dict[str, Any]:
@@ -760,6 +784,10 @@ def _handle_show(args: dict, **kw) -> str:
         pages = _show_pages(args, conn, tid)
         body_limit = _show_int(args, "comment_body_limit", _SHOW_COMMENT_BODY_DEFAULT, 1,
                                _SHOW_COMMENT_BODY_MAX)
+        fitted = {kind: _fit_page(pages[kind], rows) for kind, rows in (
+            ("comments", [_show_comment(c, body_limit) for c in pages["comments"].items]),
+            ("events", [_fields(e, ("id", *_EVENT_FIELDS)) for e in pages["events"].items]),
+            ("runs", [_fields(r, _RUN_FIELDS) for r in pages["runs"].items]))}
         return json.dumps({
             "task": _fields(task, _TASK_FIELDS),
             "active_owner": _active_owner(kb, conn, task),
@@ -770,10 +798,10 @@ def _handle_show(args: dict, **kw) -> str:
                 {"id": pid, "status": status} for pid, status in kb.unsatisfied_parents(conn, tid)],
             "children": kb.child_ids(conn, tid),
             **_steering(conn, task, body_limit),
-            "comments": [_show_comment(c, body_limit) for c in pages["comments"].items],
-            "events": [_fields(e, ("id", *_EVENT_FIELDS)) for e in pages["events"].items],
-            "runs": [_fields(r, _RUN_FIELDS) for r in pages["runs"].items],
-            "history": {kind: page.meta() for kind, page in pages.items()},
+            "comments": fitted["comments"][0],
+            "events": fitted["events"][0],
+            "runs": fitted["runs"][0],
+            "history": {kind: fitted[kind][1] for kind in pages},
             # "full" is the string the dispatcher hands a worker at spawn time.
             "worker_context_mode": mode,
             "worker_context": (None if mode == "none"

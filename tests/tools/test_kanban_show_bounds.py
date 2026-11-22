@@ -152,6 +152,7 @@ def test_compact_context_reads_only_the_newest_pages(long_card, monkeypatch):
     monkeypatch.setattr(kb, "list_comments", _guard(real_comments))
     monkeypatch.setattr(kb, "list_runs", _guard(real_runs))
     _, out = _show()
+    assert f"### {long_card['parent']}" in out["worker_context"]
     ctx = out["worker_context"]
     assert ctx.count("comment from worker `researcher`") == 5
     assert "_(31 earlier attempts omitted; showing most recent 3)_" in ctx
@@ -210,3 +211,74 @@ def test_full_worker_context_is_the_unchanged_spawn_time_string(long_card):
 def test_bad_bounds_are_rejected(long_card, args, needle):
     _, out = _show(**args)
     assert needle in out.get("error", ""), out
+
+
+def test_compact_parent_handoff_reads_one_run_per_parent(long_card, monkeypatch):
+    """A done parent with a long run history contributes its newest completed run without
+    the compact rendering loading every one of the parent's runs."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect_closing() as conn:
+        for i in range(40):
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, outcome, "
+                "summary) VALUES (?, 'planner', 'done', ?, ?, 'completed', ?)",
+                (long_card["parent"], 500 + i, 501 + i, f"handoff {i}"))
+        conn.commit()
+        full = kb.build_worker_context(conn, long_card["tid"])
+    real_runs = kb.list_runs
+
+    def guarded(conn, task_id, *a, **k):
+        if task_id == long_card["parent"]:
+            raise AssertionError("compact rendering must not load every parent run")
+        return real_runs(conn, task_id, *a, **k)
+
+    monkeypatch.setattr(kb, "list_runs", guarded)
+    _, out = _show()
+    assert "handoff 39" in out["worker_context"] and "handoff 38" not in out["worker_context"]
+    assert "handoff 39" in full  # full rendering picks the same handoff
+
+
+def test_history_note_only_claims_omission_when_rows_were_omitted(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for key in ("HERMES_SESSION_ID", "HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_TASK"):
+        monkeypatch.delenv(key, raising=False)
+    from pathlib import Path as _Path
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="short", assignee=ASSIGNEE)
+        kb.add_comment(conn, tid, "operator", "one note")
+        conn.commit()
+    _, out = _show(task_id=tid)
+    ctx = out["worker_context"]
+    assert "1 comment(s) and 0 run(s) in total" in ctx
+    assert "Older rows are omitted" not in ctx and "earlier comments omitted" not in ctx
+    assert "Nothing is omitted from the comment thread or attempts above." in ctx
+
+
+def test_combined_maxima_stay_within_a_byte_budget(long_card):
+    """Every per-parameter maximum at once must not multiply into a giant result: each page
+    keeps its newest rows within a byte budget and moves the cursor so nothing is lost."""
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect_closing() as conn:
+        for i in range(5):
+            conn.execute("INSERT INTO task_comments (task_id, author, body, created_at) "
+                         "VALUES (?, ?, ?, ?)", (long_card["tid"], ASSIGNEE, "Z" * 400_000, 9_000 + i))
+        conn.commit()
+    raw, out = _show(comment_limit=200, comment_body_limit=1_000_000, run_limit=100,
+                     event_limit=200, worker_context="none")
+    assert len(raw.encode()) < 1_200_000, len(raw.encode())
+    meta = out["history"]["comments"]
+    assert meta["trimmed_for_budget"] > 0 and meta["has_more"] is True
+    assert meta["returned"] == len(out["comments"]) >= 1
+    assert meta["next_before"] == out["comments"][0]["id"]
+    assert meta["older_count"] + meta["returned"] == meta["total"]
+    assert out["comments"][-1]["body"] == "Z" * 400_000  # a single row is never cut by the budget
+    for kind in ("runs", "events"):
+        assert out["history"][kind]["trimmed_for_budget"] == 0

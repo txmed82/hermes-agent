@@ -186,10 +186,12 @@ def _ctx_prior_attempts(
 
 def _ctx_parent_results(
     lines: list[str], conn: sqlite3.Connection, task_id: str, now: int, caps: _CtxCaps = _FULL_CAPS,
+    compact: bool = False,
 ) -> None:
     """Done-parent handoffs: newest ``completed`` run's summary+metadata,
     falling back to ``task.result`` for pre-runs-table data. Stamped with a
-    relative age so the worker re-verifies stale upstream results."""
+    relative age so the worker re-verifies stale upstream results. ``compact`` reads that
+    one run per parent with a LIMIT 1 query (same pick) instead of every parent run."""
     parent_rows = conn.execute(
         "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id", (task_id,),
     ).fetchall()
@@ -198,9 +200,13 @@ def _ctx_parent_results(
         pt = _kb.get_task(conn, pid)
         if not pt or pt.status != "done":
             continue
-        runs = [r for r in _kb.list_runs(conn, pid) if r.outcome == "completed"]
-        runs.sort(key=lambda r: r.started_at, reverse=True)
-        run = runs[0] if runs else None
+        if compact:
+            from hermes_cli.kanban_db_pages import newest_completed_run
+            run = newest_completed_run(conn, pid)
+        else:
+            runs = [r for r in _kb.list_runs(conn, pid) if r.outcome == "completed"]
+            runs.sort(key=lambda r: r.started_at, reverse=True)
+            run = runs[0] if runs else None
         if not wrote_header:
             lines.append("## Parent task results")
             lines.append(
@@ -297,11 +303,18 @@ def _ctx_compact_history(
         _ctx_comment_lines(lines, other, now, _COMPACT_CAPS)
     runs_total = history_total(conn, task.id, "runs")
     lines.append("## History bounds")
+    closed_runs = int(conn.execute(
+        "SELECT COUNT(*) FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL",
+        (task.id,)).fetchone()[0])
+    if tail.total > len(tail.items) or closed_runs > _COMPACT_CAPS.prior_attempts:
+        rest = ("Older rows are omitted here, not lost: page them exactly with kanban_show "
+                "comment_before / run_before / event_before cursors, or request "
+                "worker_context=\"full\"._")
+    else:
+        rest = "Nothing is omitted from the comment thread or attempts above._"
     lines.append(
         f"_Compact view: this task has {tail.total} comment(s) and {runs_total} run(s) in total "
-        "(runs include any active one; prior attempts count closed runs only). "
-        "Older rows are omitted here, not lost: page them exactly with kanban_show "
-        "comment_before / run_before / event_before cursors, or request worker_context=\"full\"._")
+        f"(runs include any active one; prior attempts count closed runs only). {rest}")
     lines.append("")
 
 
@@ -318,7 +331,7 @@ def render_worker_context(conn: sqlite3.Connection, task_id: str, *, compact: bo
     _ctx_header(lines, task)
     _ctx_attachments(lines, _kb.list_attachments(conn, task_id))
     _ctx_prior_attempts(lines, conn, task_id, now, caps, compact=compact)
-    _ctx_parent_results(lines, conn, task_id, now, caps)
+    _ctx_parent_results(lines, conn, task_id, now, caps, compact=compact)
     _ctx_role_history(lines, conn, task, now)
     if compact:
         from hermes_cli.kanban_db_pages import page_history
