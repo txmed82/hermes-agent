@@ -497,6 +497,12 @@ def _parse_search_output(result, output_mode: str, limit: int, offset: int,
     )
 
 
+def _find_operand(root: str) -> str:
+    """``root`` as a find start point: find takes no ``--`` before its start points, so
+    a dash-prefixed relative root (``-logs``) gets ``./`` instead of parsing as a primary."""
+    return f"./{root}" if root.startswith("-") else root
+
+
 def _posix_roots(roots: list[str]) -> bool:
     """Darwin-only: every root is POSIX-shaped (no drive letter / backslash)."""
     return sys.platform == "darwin" and all(
@@ -908,7 +914,8 @@ class SearchMixin:
             else:
                 glob_expr_probe = glob_expr
             probe_words = [rg, flags, "--count-matches", glob_expr_probe,
-                           self._escape_shell_arg(pattern, translate_path=False), self._escape_native_tool_arg(path)]
+                           "-e", self._escape_shell_arg(pattern, translate_path=False),
+                           "--", self._escape_native_tool_arg(path)]
             probe = self._run_rg_bounded(probe_words, 50, timeout=30)
             total, per_file = 0, []
             for line in (probe.stdout or "").strip().splitlines():
@@ -1034,7 +1041,10 @@ class SearchMixin:
         if fetch_limit <= 0 or not self._has_command("find"):
             return [], None
 
-        escaped_path = self._escape_shell_arg(path)
+        # find has no ``--`` for start points: anchor a dash-prefixed root with ``./``
+        # and strip that anchor again so entries match rg's spelling of the root.
+        anchored = _find_operand(path)
+        escaped_path = self._escape_shell_arg(anchored)
         escaped_pattern = self._escape_shell_arg(pattern)
         q_roots = [escaped_path]
         hidden_prune = self._hidden_prune_expr(q_roots)
@@ -1064,6 +1074,8 @@ class SearchMixin:
                 dirs.append(parts[1])
             else:
                 dirs.append(line)
+        if anchored != path:
+            dirs = [d.removeprefix("./") for d in dirs]
 
         if dirs:
             # An explicitly selected hidden root keeps its (hidden) subtree;
@@ -1118,7 +1130,7 @@ class SearchMixin:
         # Prune hidden descendant dirs (and hidden files, matching rg's default) while
         # still allowing an explicitly selected hidden root; dash-prefixed roots get
         # ``./`` so find doesn't parse them as options.
-        find_roots = [f"./{root}" if root.startswith("-") else root for root in roots]
+        find_roots = [_find_operand(root) for root in roots]
         q_roots = [self._escape_shell_arg(root) for root in find_roots]
         hidden_prune = f" {self._hidden_prune_expr(q_roots)} -o"
         protected_paths = [absolute for _r, _rel, absolute in self._effective_macos_search_exclusions(roots)]
@@ -1357,7 +1369,10 @@ class SearchMixin:
             cmd_parts.extend(["--glob", self._escape_shell_arg(file_glob)])
         if output_mode in _OUTPUT_MODE_FLAGS:
             cmd_parts.append(_OUTPUT_MODE_FLAGS[output_mode])
-        cmd_parts.append(self._escape_shell_arg(pattern, translate_path=False))
+        # ``-e`` hands rg the pattern as an option VALUE and ``--`` ends option parsing,
+        # so a regex like ``--(image|prompt)`` or a root like ``-logs`` is never read
+        # as a flag (``rg: unrecognized flag``) or, for ``--help``, as a command.
+        cmd_parts.extend(["-e", self._escape_shell_arg(pattern, translate_path=False), "--"])
         # rg is a native Windows binary (winget/cargo/choco): needs C:/... not MSYS /c/...
         cmd_parts.append(self._escape_native_tool_arg(path))
         ml_note = (
@@ -1368,7 +1383,10 @@ class SearchMixin:
 
     def _grep_cmd(self, head: list[str], pattern: str, output_mode: str, context: int,
                   file_glob: Optional[str] = None) -> list[str]:
-        """``head`` + context/include/mode flags + quoted pattern (argument order is fixed)."""
+        """``head`` + context/include/mode flags + ``-e <quoted pattern> --`` (argument
+        order is fixed). ``-e`` keeps a leading-hyphen pattern from being read as an option
+        and the trailing ``--`` keeps the operands the caller appends (search root or
+        find's ``{}``) from being read as options either."""
         parts = list(head)
         if context > 0:
             parts.extend(["-C", str(context)])
@@ -1376,7 +1394,7 @@ class SearchMixin:
             parts.extend(["--include", self._escape_shell_arg(file_glob)])
         if output_mode in _OUTPUT_MODE_FLAGS:
             parts.append(_OUTPUT_MODE_FLAGS[output_mode])
-        parts.append(self._escape_shell_arg(pattern, translate_path=False))
+        parts.extend(["-e", self._escape_shell_arg(pattern, translate_path=False), "--"])
         return parts
 
     def _search_with_grep(self, pattern: str, path: str, file_glob: Optional[str],
@@ -1415,7 +1433,8 @@ class SearchMixin:
         (#18473: grep's ``--exclude-dir='.*'`` would drop the root). Trade-off: find folds
         grep's exit code, so a hard grep error surfaces as an empty result."""
         grep_parts = self._grep_cmd(["grep", "-nHE"], pattern, output_mode, context)
-        q_root = self._escape_shell_arg(path or ".")
+        # find has no ``--`` for start points: anchor a dash-prefixed root with ``./``.
+        q_root = self._escape_shell_arg(_find_operand(path or "."))
         # ``-H``: follow a symlink handed in as the OPERAND (and only the operand). Without
         # it ``find <link> -type f`` tests the link itself and hands grep nothing, so a
         # symlinked root answered a confident ``total_count: 0`` on every platform (#116270).
