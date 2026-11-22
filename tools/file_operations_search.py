@@ -1465,6 +1465,7 @@ class SearchMixin:
             roots = [path]
             result.files = [_unanchor_find_path(f, roots) for f in result.files]
             result.counts = {_unanchor_find_path(f, roots): n for f, n in result.counts.items()}
+            result.skipped_paths = [_unanchor_find_path(f, roots) for f in result.skipped_paths]
             for match in result.matches:
                 match.path = _unanchor_find_path(match.path, roots)
         return result

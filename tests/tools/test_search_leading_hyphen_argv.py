@@ -155,6 +155,21 @@ def test_grep_pruned_lane_dash_root_spelled_as_given(tmp_path, monkeypatch, mode
     assert paths == ["-logs/run.log"]
 
 
+def test_grep_pruned_lane_dash_root_skipped_paths_spelled_as_given(tmp_path, monkeypatch):
+    hidden = tmp_path / ".cache" / "proj"
+    locked = hidden / "-logs" / "locked"
+    locked.mkdir(parents=True)
+    (hidden / "-logs" / "run.log").write_text("  --image FILE\n")
+    locked.chmod(0)
+    try:
+        result = _ops(hidden, monkeypatch, "grep").search("--image", path="-logs")
+    finally:
+        locked.chmod(0o755)
+    assert result.error is None, result.error
+    assert [m.path for m in result.matches] == ["-logs/run.log"]
+    assert result.skipped_paths == ["-logs/locked"]
+
+
 @pytest.mark.parametrize("native", [True, False])
 def test_zero_match_probe_handles_leading_hyphen(tree, monkeypatch, native):
     # Exact-case search misses; the case-insensitive probe must still run (not
