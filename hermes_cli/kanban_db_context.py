@@ -12,6 +12,7 @@ import json
 import os
 import sqlite3
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import hermes_cli.kanban_db as _kb
@@ -25,6 +26,21 @@ _CTX_MAX_COMMENTS       = 30      # most recent N comments shown in full
 _CTX_MAX_FIELD_BYTES    = 4 * 1024   # per summary/error/metadata/result
 _CTX_MAX_BODY_BYTES     = 8 * 1024   # per task.body (opening post)
 _CTX_MAX_COMMENT_BYTES  = 2 * 1024   # per comment
+
+
+@dataclass(frozen=True)
+class _CtxCaps:
+    prior_attempts: int = _CTX_MAX_PRIOR_ATTEMPTS
+    comments: int = _CTX_MAX_COMMENTS
+    field_bytes: int = _CTX_MAX_FIELD_BYTES
+    comment_bytes: int = _CTX_MAX_COMMENT_BYTES
+
+
+# Spawn-time prompt (unchanged) vs the ``kanban_show`` orientation default: the body keeps its
+# full cap in both; compact shortens the history tails and the per-field/per-comment caps, and
+# every omission is stated in the text.
+_FULL_CAPS = _CtxCaps()
+_COMPACT_CAPS = _CtxCaps(prior_attempts=3, comments=5, field_bytes=1024, comment_bytes=1024)
 
 
 def _relative_age(ts: Optional[int], now: Optional[int] = None) -> str:
@@ -64,13 +80,20 @@ def _ctx_stamp(ts: int, now: int) -> str:
     return f"{disp}, {age}" if age else disp
 
 
-def _ctx_metadata_line(metadata: Any) -> Optional[str]:
+def _ctx_metadata_line(metadata: Any, limit: int = _CTX_MAX_FIELD_BYTES) -> Optional[str]:
     if not metadata:
         return None
     try:
-        return f"_metadata_: `{_ctx_cap(json.dumps(metadata, ensure_ascii=False, sort_keys=True))}`"
+        return f"_metadata_: `{_ctx_cap(json.dumps(metadata, ensure_ascii=False, sort_keys=True), limit)}`"
     except Exception:
         return None
+
+
+def _ctx_omitted_note(omitted: int, shown: int, noun: str) -> Optional[str]:
+    if omitted <= 0:
+        return None
+    return (f"_({omitted} earlier {noun}{'s' if omitted != 1 else ''} "
+            f"omitted; showing most recent {shown})_")
 
 
 def _ctx_tail(items: list, cap: int, noun: str) -> tuple[list, Optional[str]]:
@@ -78,10 +101,7 @@ def _ctx_tail(items: list, cap: int, noun: str) -> tuple[list, Optional[str]]:
     omitted = max(0, len(items) - cap)
     if not omitted:
         return items, None
-    return items[-cap:], (
-        f"_({omitted} earlier {noun}{'s' if omitted != 1 else ''} "
-        f"omitted; showing most recent {cap})_"
-    )
+    return items[-cap:], _ctx_omitted_note(omitted, cap, noun)
 
 
 def _ctx_header(lines: list[str], task: Task) -> None:
@@ -127,14 +147,24 @@ def _ctx_attachments(lines: list[str], attachments: list[Attachment]) -> None:
     lines.append("")
 
 
-def _ctx_prior_attempts(lines: list[str], conn: sqlite3.Connection, task_id: str, now: int) -> None:
+def _ctx_prior_attempts(
+    lines: list[str], conn: sqlite3.Connection, task_id: str, now: int, caps: _CtxCaps = _FULL_CAPS,
+    compact: bool = False,
+) -> None:
     """Closed runs on this task (the active run is this worker), newest
-    ``_CTX_MAX_PRIOR_ATTEMPTS`` in full, older ones as a one-line marker."""
-    all_prior = [r for r in _kb.list_runs(conn, task_id) if r.ended_at is not None]
-    shown, omitted_note = _ctx_tail(all_prior, _CTX_MAX_PRIOR_ATTEMPTS, "attempt")
+    ``caps.prior_attempts`` in full, older ones as a one-line marker. ``compact`` reads
+    only that newest page plus an exact count instead of every run."""
+    if compact:
+        from hermes_cli.kanban_db_pages import closed_runs_tail
+        shown, total = closed_runs_tail(conn, task_id, caps.prior_attempts)
+        omitted_note = _ctx_omitted_note(total - len(shown), len(shown), "attempt")
+    else:
+        all_prior = [r for r in _kb.list_runs(conn, task_id) if r.ended_at is not None]
+        total = len(all_prior)
+        shown, omitted_note = _ctx_tail(all_prior, caps.prior_attempts, "attempt")
     if not shown:
         return
-    first_shown_idx = len(all_prior) - len(shown) + 1
+    first_shown_idx = total - len(shown) + 1
     lines.append("## Prior attempts on this task")
     if omitted_note:
         lines.append(omitted_note)
@@ -145,19 +175,23 @@ def _ctx_prior_attempts(lines: list[str], conn: sqlite3.Connection, task_id: str
             f"### Attempt {first_shown_idx + offset} — {outcome} ({profile}, {_ctx_stamp(run.started_at, now)})"
         )
         if run.summary and run.summary.strip():
-            lines.append(_ctx_cap(run.summary))
+            lines.append(_ctx_cap(run.summary, caps.field_bytes))
         if run.error and run.error.strip():
-            lines.append(f"_error_: {_ctx_cap(run.error)}")
-        meta_line = _ctx_metadata_line(run.metadata)
+            lines.append(f"_error_: {_ctx_cap(run.error, caps.field_bytes)}")
+        meta_line = _ctx_metadata_line(run.metadata, caps.field_bytes)
         if meta_line:
             lines.append(meta_line)
         lines.append("")
 
 
-def _ctx_parent_results(lines: list[str], conn: sqlite3.Connection, task_id: str, now: int) -> None:
+def _ctx_parent_results(
+    lines: list[str], conn: sqlite3.Connection, task_id: str, now: int, caps: _CtxCaps = _FULL_CAPS,
+    compact: bool = False,
+) -> None:
     """Done-parent handoffs: newest ``completed`` run's summary+metadata,
     falling back to ``task.result`` for pre-runs-table data. Stamped with a
-    relative age so the worker re-verifies stale upstream results."""
+    relative age so the worker re-verifies stale upstream results. ``compact`` reads that
+    one run per parent with a LIMIT 1 query (same pick) instead of every parent run."""
     parent_rows = conn.execute(
         "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id", (task_id,),
     ).fetchall()
@@ -166,9 +200,13 @@ def _ctx_parent_results(lines: list[str], conn: sqlite3.Connection, task_id: str
         pt = _kb.get_task(conn, pid)
         if not pt or pt.status != "done":
             continue
-        runs = [r for r in _kb.list_runs(conn, pid) if r.outcome == "completed"]
-        runs.sort(key=lambda r: r.started_at, reverse=True)
-        run = runs[0] if runs else None
+        if compact:
+            from hermes_cli.kanban_db_pages import newest_completed_run
+            run = newest_completed_run(conn, pid)
+        else:
+            runs = [r for r in _kb.list_runs(conn, pid) if r.outcome == "completed"]
+            runs.sort(key=lambda r: r.started_at, reverse=True)
+            run = runs[0] if runs else None
         if not wrote_header:
             lines.append("## Parent task results")
             lines.append(
@@ -183,12 +221,12 @@ def _ctx_parent_results(lines: list[str], conn: sqlite3.Connection, task_id: str
         age = _relative_age(done_ts, now)
         lines.append(f"### {pid}" + (f" (completed {age})" if age else ""))
         if run is not None and run.summary and run.summary.strip():
-            lines.append(_ctx_cap(run.summary))
+            lines.append(_ctx_cap(run.summary, caps.field_bytes))
         elif pt.result:
-            lines.append(_ctx_cap(pt.result))
+            lines.append(_ctx_cap(pt.result, caps.field_bytes))
         else:
             lines.append("(no result recorded)")
-        meta_line = _ctx_metadata_line(run.metadata) if run is not None else None
+        meta_line = _ctx_metadata_line(run.metadata, caps.field_bytes) if run is not None else None
         if meta_line:
             lines.append(meta_line)
         lines.append("")
@@ -217,12 +255,20 @@ def _ctx_role_history(lines: list[str], conn: sqlite3.Connection, task: Task, no
     lines.append("")
 
 
-def _ctx_comments(lines: list[str], comments: list[Comment], now: int) -> None:
-    """Newest ``_CTX_MAX_COMMENTS`` comments. The explicit "comment from
-    worker" framing stops an operator-controlled HERMES_PROFILE like
+def _ctx_comments(
+    lines: list[str], comments: list[Comment], now: int, caps: _CtxCaps = _FULL_CAPS,
+    total: Optional[int] = None,
+) -> None:
+    """Newest ``caps.comments`` comments. ``total`` marks ``comments`` as an already-read
+    newest page of a thread that long (compact view), so only the page is loaded. The
+    explicit "comment from worker" framing stops an operator-controlled HERMES_PROFILE like
     "hermes-system" being read as a system directive above an
     attacker-influenceable body (defense-in-depth)."""
-    shown, omitted_note = _ctx_tail(comments, _CTX_MAX_COMMENTS, "comment")
+    if total is None:
+        shown, omitted_note = _ctx_tail(comments, caps.comments, "comment")
+    else:
+        shown = comments
+        omitted_note = _ctx_omitted_note(total - len(shown), len(shown), "comment")
     if not shown:
         return
     lines.append("## Comment thread")
@@ -233,7 +279,65 @@ def _ctx_comments(lines: list[str], comments: list[Comment], now: int) -> None:
         # values like "hermes-system" or "operator" can't be misread by the next worker as a system
         # directive above the (attacker-influenceable) comment body. Defense-in-depth — the LLM-controlled
         # author-forgery surface was already closed in #22435. See #22452.
-        safe_author = (c.author or "").replace("`", "")
-        lines.append(f"comment from worker `{safe_author}` at {_ctx_stamp(c.created_at, now)}:")
-        lines.append(_ctx_cap(c.body, _CTX_MAX_COMMENT_BYTES))
-        lines.append("")
+        _ctx_comment_lines(lines, c, now, caps)
+
+
+def _ctx_comment_lines(lines: list[str], c: Comment, now: int, caps: _CtxCaps) -> None:
+    safe_author = (c.author or "").replace("`", "")
+    lines.append(f"comment from worker `{safe_author}` at {_ctx_stamp(c.created_at, now)}:")
+    lines.append(_ctx_cap(c.body, caps.comment_bytes))
+    lines.append("")
+
+
+def _ctx_compact_history(
+    lines: list[str], conn: sqlite3.Connection, task: Task, now: int, tail: Any,
+) -> None:
+    """Compact-only: the newest comment by someone other than the assignee even when it fell
+    out of the comment tail, plus exact totals and how to page older rows. The author is not
+    verified: it may be an operator or another worker's handoff, so it is labelled as such."""
+    from hermes_cli.kanban_db_pages import history_total, latest_comment_not_by
+    other = latest_comment_not_by(conn, task.id, task.assignee)
+    if other is not None and all(c.id != other.id for c in tail.items):
+        lines.append("## Latest comment by someone other than the assignee "
+                     "(author unverified: operator or another worker)")
+        _ctx_comment_lines(lines, other, now, _COMPACT_CAPS)
+    runs_total = history_total(conn, task.id, "runs")
+    lines.append("## History bounds")
+    closed_runs = int(conn.execute(
+        "SELECT COUNT(*) FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL",
+        (task.id,)).fetchone()[0])
+    if tail.total > len(tail.items) or closed_runs > _COMPACT_CAPS.prior_attempts:
+        rest = ("Older rows are omitted here, not lost: page them exactly with kanban_show "
+                "comment_before / run_before / event_before cursors, or request "
+                "worker_context=\"full\"._")
+    else:
+        rest = "Nothing is omitted from the comment thread or attempts above._"
+    lines.append(
+        f"_Compact view: this task has {tail.total} comment(s) and {runs_total} run(s) in total "
+        f"(runs include any active one; prior attempts count closed runs only). {rest}")
+    lines.append("")
+
+
+def render_worker_context(conn: sqlite3.Connection, task_id: str, *, compact: bool = False) -> str:
+    """Body of :func:`hermes_cli.kanban_db.build_worker_context`; ``compact`` shrinks only the
+    history tails (``_COMPACT_CAPS``) and adds steering + totals so nothing is silently dropped."""
+    task = _kb.get_task(conn, task_id)
+    if not task:
+        raise ValueError(f"unknown task {task_id}")
+    caps = _COMPACT_CAPS if compact else _FULL_CAPS
+    # One clock reading so every relative age in this rendering agrees.
+    now = int(time.time())
+    lines: list[str] = []
+    _ctx_header(lines, task)
+    _ctx_attachments(lines, _kb.list_attachments(conn, task_id))
+    _ctx_prior_attempts(lines, conn, task_id, now, caps, compact=compact)
+    _ctx_parent_results(lines, conn, task_id, now, caps, compact=compact)
+    _ctx_role_history(lines, conn, task, now)
+    if compact:
+        from hermes_cli.kanban_db_pages import page_history
+        tail = page_history(conn, task_id, "comments", limit=caps.comments)
+        _ctx_comments(lines, tail.items, now, caps, total=tail.total)
+        _ctx_compact_history(lines, conn, task, now, tail)
+    else:
+        _ctx_comments(lines, _kb.list_comments(conn, task_id), now, caps)
+    return "\n".join(lines).rstrip() + "\n"

@@ -659,9 +659,110 @@ def inject_new_comments_from_env(agent: Any) -> bool:
 
 # --- Handlers ---
 
+# kanban_show history pages: (limit arg, cursor arg, default, max) per history kind. Defaults keep a
+# bare orientation call small on a card with hundreds of comments/runs; every page reports the real
+# total, ``has_more`` and an exact ``next_before`` cursor, so older rows are paged, never hidden.
+_SHOW_PAGES = {
+    "comments": ("comment_limit", "comment_before", 5, 200),
+    "runs": ("run_limit", "run_before", 5, 100),
+    "events": ("event_limit", "event_before", 50, 200),
+}
+_SHOW_WORKER_CONTEXT_MODES = ("compact", "full", "none")
+_SQLITE_MAX_INT = 2**63 - 1  # largest id a cursor can name
+# The active run as explicit scalars only: never claim locks, pids, metadata or env.
+_ACTIVE_RUN_FIELDS = tuple(
+    "id profile status step_key started_at last_heartbeat_at max_runtime_seconds".split())
+_SHOW_MAX_COMMENT_AUTHORS = 20
+# Per-comment body cap in the JSON payload (chars), so a few huge comments cannot defeat the
+# row bound. A capped body says so; one comment reads in full with comment_before=<id + 1>,
+# comment_limit=1, comment_body_limit=<its body_chars>.
+_SHOW_COMMENT_BODY_DEFAULT = 4096
+_SHOW_COMMENT_BODY_MAX = 1_000_000
+# Serialized size budget per history page (JSON chars == bytes, ASCII-escaped). The row
+# limits and body cap alone multiply out to hundreds of MB, so a page that would exceed this
+# keeps its newest rows that fit (always at least one) and moves ``next_before`` to the
+# oldest kept row: the dropped rows stay reachable by paging, and ``trimmed_for_budget``
+# says how many were moved to the next page.
+_SHOW_PAGE_BUDGET_CHARS = 256_000
+
+
+def _show_int(args: dict, name: str, default: Optional[int], lo: int, hi: Optional[int]) -> Optional[int]:
+    value = args.get(name)
+    if value is None:
+        return default
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        raise _Reject(f"{name} must be an integer")
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        raise _Reject(f"{name} must be an integer")
+    _check(value >= lo, f"{name} must be >= {lo}")
+    _check(hi is None or value <= hi, f"{name} must be <= {hi}")
+    return value
+
+
+def _show_pages(args: dict, conn, tid: str) -> dict[str, Any]:
+    from hermes_cli.kanban_db_pages import page_history
+    pages = {}
+    for kind, (limit_arg, before_arg, default, hi) in _SHOW_PAGES.items():
+        pages[kind] = page_history(
+            conn, tid, kind, limit=_show_int(args, limit_arg, default, 0, hi),
+            before=_show_int(args, before_arg, None, 1, _SQLITE_MAX_INT))
+    return pages
+
+
+def _fit_page(page, rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Keep the newest ``rows`` whose JSON fits ``_SHOW_PAGE_BUDGET_CHARS`` (at least one)."""
+    meta = page.meta()
+    used, keep = 0, 0
+    for row in reversed(rows):  # rows are oldest -> newest
+        size = len(json.dumps(row)) + 2  # ", " separator
+        if keep and used + size > _SHOW_PAGE_BUDGET_CHARS:
+            break
+        used, keep = used + size, keep + 1
+    dropped = len(rows) - keep
+    meta["trimmed_for_budget"] = dropped
+    if dropped:
+        rows = rows[dropped:]
+        meta.update(returned=len(rows), older_count=page.older_count + dropped,
+                    has_more=True, next_before=int(rows[0]["id"]))
+    return rows, meta
+
+
+def _active_owner(kb, conn, task) -> dict[str, Any]:
+    run = kb.get_run(conn, task.current_run_id) if task.current_run_id else None
+    return {"assignee": task.assignee, "status": task.status,
+            "claimed": task.claim_lock is not None,
+            "run": _fields(run, _ACTIVE_RUN_FIELDS) if run is not None else None}
+
+
+def _show_comment(c, body_limit: int) -> dict[str, Any]:
+    out = _fields(c, ("id", *_COMMENT_FIELDS))
+    body = out.get("body") or ""
+    if len(body) > body_limit:
+        out["body"] = body[:body_limit] + f"… [truncated, {len(body) - body_limit} chars omitted]"
+        out["body_truncated"] = True
+        out["body_chars"] = len(body)
+    return out
+
+
+def _steering(conn, task, body_limit: int) -> dict[str, Any]:
+    """Newest comment by anyone but the assignee, wherever it sits in the thread, plus
+    per-author counts so a long monitor/self-comment run cannot bury it. The author is
+    not verified (an operator or another worker's handoff), so the key says only that."""
+    from hermes_cli.kanban_db_pages import comment_author_counts, latest_comment_not_by
+    other = latest_comment_not_by(conn, task.id, task.assignee)
+    authors = comment_author_counts(conn, task.id)
+    return {
+        "latest_non_assignee_comment": _show_comment(other, body_limit) if other is not None else None,
+        "comment_authors": authors[:_SHOW_MAX_COMMENT_AUTHORS],
+        "comment_author_count": len(authors)}
+
+
 @_kanban_handler("kanban_show")
 def _handle_show(args: dict, **kw) -> str:
-    """Full task state: row, parents, children, comments, runs, last 50 events."""
+    """Task state: row, dependencies, active owner, newest non-assignee comment, and bounded,
+    cursor-paged comments/runs/events (``history`` holds the exact counts)."""
     tid = _default_task_id(args.get("task_id"))
     if not tid:
         # No dispatcher task in scope and no explicit id: the caller asked "what
@@ -674,22 +775,37 @@ def _handle_show(args: dict, **kw) -> str:
                 "task to show by default. Call kanban_list to see task ids on "
                 "the board, then kanban_show(task_id=<id>) for full state."),
         })
+    mode = args.get("worker_context")
+    mode = "compact" if mode is None else mode
+    _check(mode in _SHOW_WORKER_CONTEXT_MODES,
+           f"worker_context must be one of {', '.join(_SHOW_WORKER_CONTEXT_MODES)}")
     with _board(args.get("board")) as (kb, conn):
         task = _existing_task(kb, conn, tid)
+        pages = _show_pages(args, conn, tid)
+        body_limit = _show_int(args, "comment_body_limit", _SHOW_COMMENT_BODY_DEFAULT, 1,
+                               _SHOW_COMMENT_BODY_MAX)
+        fitted = {kind: _fit_page(pages[kind], rows) for kind, rows in (
+            ("comments", [_show_comment(c, body_limit) for c in pages["comments"].items]),
+            ("events", [_fields(e, ("id", *_EVENT_FIELDS)) for e in pages["events"].items]),
+            ("runs", [_fields(r, _RUN_FIELDS) for r in pages["runs"].items]))}
         return json.dumps({
             "task": _fields(task, _TASK_FIELDS),
+            "active_owner": _active_owner(kb, conn, task),
             "parents": kb.parent_ids(conn, tid),
             # Non-terminal parents; on a running card this means the dependency
             # gate is not holding it and kanban_complete will refuse.
             "unsatisfied_parents": [
                 {"id": pid, "status": status} for pid, status in kb.unsatisfied_parents(conn, tid)],
             "children": kb.child_ids(conn, tid),
-            "comments": [_fields(c, _COMMENT_FIELDS) for c in kb.list_comments(conn, tid)],
-            # Capped; full log via CLI.
-            "events": [_fields(e, _EVENT_FIELDS) for e in kb.list_events(conn, tid)[-50:]],
-            "runs": [_fields(r, _RUN_FIELDS) for r in kb.list_runs(conn, tid)],
-            # Same string build_worker_context hands the dispatcher at spawn time.
-            "worker_context": kb.build_worker_context(conn, tid)})
+            **_steering(conn, task, body_limit),
+            "comments": fitted["comments"][0],
+            "events": fitted["events"][0],
+            "runs": fitted["runs"][0],
+            "history": {kind: fitted[kind][1] for kind in pages},
+            # "full" is the string the dispatcher hands a worker at spawn time.
+            "worker_context_mode": mode,
+            "worker_context": (None if mode == "none"
+                               else kb.build_worker_context(conn, tid, compact=mode == "compact"))})
 
 
 @_kanban_handler("kanban_list")

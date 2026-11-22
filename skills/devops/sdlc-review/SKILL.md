@@ -58,7 +58,7 @@ A requested-changes transition returns the task to its original implementer. Whe
 
 Vary how you look at the work on each round instead of repeating the same inspection. Decorrelated lenses catch different defect classes: a cold read of the artifact surfaces design and correctness problems that the implementer's narrative would have framed away, execution surfaces claims that do not reproduce, and a strict contract audit surfaces quiet scope drift. Repeating the round-1 lens on round 3 mostly re-finds what round 1 already found.
 
-Determine the current round from the history the task record already gives you: count the `changes_requested` entries in the "Prior attempts on this task" section of your worker context (also visible as prior runs in `kanban_show`). The current review round is that count plus one. Round 1 therefore shows zero `changes_requested` attempts; round 2 shows one; and so on.
+Determine the current round from the task's run history: count the runs whose outcome is `changes_requested`. The worker context and a bare `kanban_show` show only the newest attempts (an "earlier attempts omitted" note or `history.runs.has_more: true` says older ones exist), so count from `kanban_show(run_limit=100)` and keep paging with `run_before=<history.runs.next_before>` until `has_more` is false. The current review round is that count plus one. Round 1 therefore shows zero `changes_requested` attempts; round 2 shows one; and so on.
 
 | Round | Lens | How to apply it |
 |---|---|---|
