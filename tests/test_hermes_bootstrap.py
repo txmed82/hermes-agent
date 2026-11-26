@@ -667,7 +667,7 @@ import os, sys
 root, mode = sys.argv[1], sys.argv[2]
 sys.path.insert(0, root)
 real_getcwd, real_chdir = os.getcwd, os.chdir
-calls = {"getcwd": 0, "chdir": []}
+calls = {"getcwd": 0, "chdir": [], "sleep": 0}
 def fake_getcwd():
     calls["getcwd"] += 1
     if mode == "interrupted_twice" and calls["getcwd"] <= 2:
@@ -680,21 +680,23 @@ def fake_getcwd():
 os.getcwd = fake_getcwd
 os.chdir = lambda path: calls["chdir"].append(str(path))
 import time
-time.sleep = lambda seconds: None
+def fake_sleep(seconds):
+    calls["sleep"] += 1
+time.sleep = fake_sleep
 import hermes_bootstrap
-print("CWD_PROBE", calls["getcwd"], len(calls["chdir"]))
+print("CWD_PROBE", calls["getcwd"], len(calls["chdir"]), calls["sleep"])
 """
 
 
 @pytest.mark.parametrize(
-    ("mode", "expected_calls", "expected_chdirs"),
+    ("mode", "expected_calls", "expected_chdirs", "expected_sleeps"),
     [
-        ("interrupted_twice", 3, 0),
-        ("always_interrupted", 6, 0),
-        ("deleted", 1, 1),
+        ("interrupted_twice", 3, 0, 2),
+        ("always_interrupted", 6, 0, 5),  # no pause after the last try
+        ("deleted", 1, 1, 0),
     ],
 )
-def test_cwd_probe_survives_interrupted_getcwd(mode, expected_calls, expected_chdirs):
+def test_cwd_probe_survives_interrupted_getcwd(mode, expected_calls, expected_chdirs, expected_sleeps):
     """A slow external volume can interrupt getcwd() (EINTR) at worker startup.
 
     The probe only exists to recover from a deleted cwd, so an interrupted call
@@ -708,6 +710,7 @@ def test_cwd_probe_survives_interrupted_getcwd(mode, expected_calls, expected_ch
     assert result.returncode == 0, result.stderr[-2000:]
     probe = [line for line in result.stdout.splitlines() if line.startswith("CWD_PROBE ")]
     assert len(probe) == 1, result.stdout
-    getcwd_calls, chdirs = (int(x) for x in probe[0].split()[1:])
+    getcwd_calls, chdirs, sleeps = (int(x) for x in probe[0].split()[1:])
     assert chdirs == expected_chdirs
     assert getcwd_calls == expected_calls
+    assert sleeps == expected_sleeps

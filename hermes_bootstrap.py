@@ -500,7 +500,8 @@ def _recover_deleted_cwd() -> None:
             os.chdir(_root)
             return
         except InterruptedError:
-            time.sleep(0.05 * (2 ** attempt))
+            if attempt < 5:  # no pause after the last try
+                time.sleep(0.05 * (2 ** attempt))
 
 
 _recover_deleted_cwd()
