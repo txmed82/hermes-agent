@@ -682,7 +682,7 @@ os.chdir = lambda path: calls["chdir"].append(str(path))
 import time
 time.sleep = lambda seconds: None
 import hermes_bootstrap
-print(calls["getcwd"], len(calls["chdir"]))
+print("CWD_PROBE", calls["getcwd"], len(calls["chdir"]))
 """
 
 
@@ -690,7 +690,7 @@ print(calls["getcwd"], len(calls["chdir"]))
     ("mode", "expected_calls", "expected_chdirs"),
     [
         ("interrupted_twice", 3, 0),
-        ("always_interrupted", None, 0),
+        ("always_interrupted", 6, 0),
         ("deleted", 1, 1),
     ],
 )
@@ -706,9 +706,8 @@ def test_cwd_probe_survives_interrupted_getcwd(mode, expected_calls, expected_ch
         capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, result.stderr[-2000:]
-    getcwd_calls, chdirs = (int(x) for x in result.stdout.split()[-2:])
+    probe = [line for line in result.stdout.splitlines() if line.startswith("CWD_PROBE ")]
+    assert len(probe) == 1, result.stdout
+    getcwd_calls, chdirs = (int(x) for x in probe[0].split()[1:])
     assert chdirs == expected_chdirs
-    if expected_calls is not None:
-        assert getcwd_calls == expected_calls
-    else:
-        assert getcwd_calls > 1
+    assert getcwd_calls == expected_calls
