@@ -660,3 +660,55 @@ class TestNeverFreeEnviron:
             grown = tracemalloc.get_traced_memory()[0] - before
             assert grown < 64 * 1024, f"20k set/del of 4 names grew the heap by {grown} bytes"
         """)], check=True, cwd=str(Path(__file__).resolve().parents[1]), timeout=120)
+
+
+_CWD_PROBE = """
+import os, sys
+root, mode = sys.argv[1], sys.argv[2]
+sys.path.insert(0, root)
+real_getcwd, real_chdir = os.getcwd, os.chdir
+calls = {"getcwd": 0, "chdir": []}
+def fake_getcwd():
+    calls["getcwd"] += 1
+    if mode == "interrupted_twice" and calls["getcwd"] <= 2:
+        raise InterruptedError(4, "Interrupted system call")
+    if mode == "always_interrupted":
+        raise InterruptedError(4, "Interrupted system call")
+    if mode == "deleted" and calls["getcwd"] == 1:
+        raise FileNotFoundError(2, "No such file or directory")
+    return real_getcwd()
+os.getcwd = fake_getcwd
+os.chdir = lambda path: calls["chdir"].append(str(path))
+import time
+time.sleep = lambda seconds: None
+import hermes_bootstrap
+print(calls["getcwd"], len(calls["chdir"]))
+"""
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_calls", "expected_chdirs"),
+    [
+        ("interrupted_twice", 3, 0),
+        ("always_interrupted", None, 0),
+        ("deleted", 1, 1),
+    ],
+)
+def test_cwd_probe_survives_interrupted_getcwd(mode, expected_calls, expected_chdirs):
+    """A slow external volume can interrupt getcwd() (EINTR) at worker startup.
+
+    The probe only exists to recover from a deleted cwd, so an interrupted call
+    is retried and, if it never answers, left alone instead of crashing import.
+    """
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-c", _CWD_PROBE, str(root), mode],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    getcwd_calls, chdirs = (int(x) for x in result.stdout.split()[-2:])
+    assert chdirs == expected_chdirs
+    if expected_calls is not None:
+        assert getcwd_calls == expected_calls
+    else:
+        assert getcwd_calls > 1

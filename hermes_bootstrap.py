@@ -480,12 +480,30 @@ install_never_free_environ()
 from pathlib import Path
 
 _root = Path(__file__).resolve().parent
-try:
-    os.getcwd()
-except FileNotFoundError:
-    # Reaped workspaces leave children in a deleted cwd. PM resolves relative
-    # import paths before the CLI's guards, so recover before any PM work.
-    os.chdir(_root)
+
+
+def _recover_deleted_cwd() -> None:
+    """Move off a deleted cwd before any PM work resolves relative paths.
+
+    Reaped workspaces leave children in a deleted cwd, and PM resolves
+    relative import paths before the CLI's guards. A slow or briefly
+    unresponsive volume (an exFAT USB drive, a network mount) can also make
+    getcwd() fail with EINTR. That cwd still exists, so retry briefly and, if
+    it never answers, leave it alone: this probe exists only for the deleted
+    case and must not kill the process at import time.
+    """
+    for attempt in range(6):
+        try:
+            os.getcwd()
+            return
+        except FileNotFoundError:
+            os.chdir(_root)
+            return
+        except InterruptedError:
+            time.sleep(0.05 * (2 ** attempt))
+
+
+_recover_deleted_cwd()
 
 
 def _legacy_post_swap_invocation(argv: list[str]) -> tuple[Path, list[str]] | None:
