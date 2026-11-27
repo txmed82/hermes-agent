@@ -76,10 +76,10 @@ def discover_owner(home: Path):
 
 
 @contextlib.asynccontextmanager
-async def connect_owner(home: Path, endpoint, *, scope=None, max_size: int = 2 ** 20):
+async def connect_owner(home: Path, endpoint, *, scope=None, max_size: int = 64 * 2 ** 20):
     """A ``GatewayClient`` on ``endpoint``, the ready gateway serving ``home``; ``scope``: the
     ticket's profile scope (``"host"``: the one native Desktop holds); ``max_size``: the largest
-    answer frame accepted (websockets' 1 MiB default)."""
+    answer frame accepted (64 MiB: a ``session.resume`` answer carries the whole history, and long chats exceed websockets' 1 MiB default)."""
     from hermes_cli.gateway_client import GATEWAY_WS_PROTOCOL, GatewayClient, _session_ticket, gateway_ws_target
     from websockets.asyncio.client import connect
 
