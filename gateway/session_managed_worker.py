@@ -278,7 +278,10 @@ class ManagedWorker:
             stopper.cancel()
             arrived.cancel()
 
-    def interrupt(self):
+    def interrupt(self, message=None, **_):
+        # ``request_hard_interrupt`` calls the legacy ``interrupt(message)`` ABI when there is no
+        # ``hard_interrupt``. Refusing the message argument raised TypeError mid-retire and left the
+        # whole profile runtime stuck draining (every chat and cron job failed runtime_draining).
         self.control({'type': 'stop'})
 
     def respond(self, kind, prompt_id, value):
