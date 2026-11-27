@@ -354,7 +354,12 @@ def stop_authority_turns(authority, *, in_process=False, reason=None):
         if agent is None or agent is _AGENT_PENDING_SENTINEL:
             authority.pending_stops[sid] = generation
         else:
-            request_hard_interrupt(agent, 'Profile stopping', tool_reason='gateway shutdown')
+            # One turn's agent failing to take the Stop must not abort the drain for the rest:
+            # an exception here unwinds the whole unserve and leaves the profile draining.
+            try:
+                request_hard_interrupt(agent, 'Profile stopping', tool_reason='gateway shutdown')
+            except Exception:
+                logger.warning('Profile stop could not interrupt session %s', sid, exc_info=True)
         signalled += 1
     return signalled
 

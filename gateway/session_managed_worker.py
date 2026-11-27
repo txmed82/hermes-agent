@@ -282,7 +282,13 @@ class ManagedWorker:
         # ``request_hard_interrupt`` calls the legacy ``interrupt(message)`` ABI when there is no
         # ``hard_interrupt``. Refusing the message argument raised TypeError mid-retire and left the
         # whole profile runtime stuck draining (every chat and cron job failed runtime_draining).
-        self.control({'type': 'stop'})
+        # The same unwind must not come from a worker that already closed (nothing left to stop)
+        # or a full control queue (``control`` latched ``stop`` first; the read loop escalates it).
+        try:
+            self.control({'type': 'stop'})
+        except RuntimeStoreError as exc:
+            if exc.reason not in ('managed_worker_lost', 'worker_control_backpressure'):
+                raise
 
     def respond(self, kind, prompt_id, value):
         self.control({'type': kind, 'prompt_id': prompt_id, 'value': value})
