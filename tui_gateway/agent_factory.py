@@ -213,6 +213,9 @@ def _runtime_model_config(agent, existing: dict | None = None) -> dict:
     from hermes_cli.runtime_provider_custom import session_provider_identity
     provider = session_provider_identity(raw_provider, requested, base_url, model)
     reasoning_config = getattr(agent, "reasoning_config", None)
+    if getattr(agent, "_fallback_activated", False) and isinstance(primary, dict) and primary.get("model"):
+        # The fallback's reasoning settings belong to the detour too; keep the primary's.
+        reasoning_config = primary.get("reasoning_config")
     live = {
         "model": model, "provider": provider, "base_url": base_url, "api_mode": api_mode,
         # An empty dict is still a real (present) reasoning config.

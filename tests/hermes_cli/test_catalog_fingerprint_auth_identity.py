@@ -29,3 +29,13 @@ def test_account_change_changes_identity(tmp_path):
     _write(p, [{"id": "a2", "source": "manual"}])
     assert m._auth_store_identity(p, "antigravity") != before
     assert m._auth_store_identity(tmp_path / "nope.json", "antigravity") == "missing"
+
+
+def test_provider_state_account_switch_changes_identity(tmp_path):
+    p = tmp_path / "auth.json"
+    _write(p, [], {"providers": {"antigravity": {"email": "a@x.com", "access_token": "t1"}}})
+    before = m._auth_store_identity(p, "antigravity")
+    _write(p, [], {"providers": {"antigravity": {"email": "a@x.com", "access_token": "t2"}}})
+    assert m._auth_store_identity(p, "antigravity") == before
+    _write(p, [], {"providers": {"antigravity": {"email": "b@x.com", "access_token": "t2"}}})
+    assert m._auth_store_identity(p, "antigravity") != before

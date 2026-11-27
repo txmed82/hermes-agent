@@ -13,13 +13,15 @@ def _agent(**kw):
 
 
 def test_fallback_turn_persists_primary_route():
-    agent = _agent(_fallback_activated=True, _primary_runtime={
+    agent = _agent(_fallback_activated=True, reasoning_config={"effort": "low"}, _primary_runtime={
         "model": "claude-opus-5-5", "provider": "anthropic", "requested_provider": "anthropic",
-        "base_url": "https://api.anthropic.com", "api_mode": "anthropic_messages"})
+        "base_url": "https://api.anthropic.com", "api_mode": "anthropic_messages",
+        "reasoning_config": {"effort": "high"}})
     cfg = _runtime_model_config(agent, {})
     assert cfg["model"] == "claude-opus-5-5"
     assert cfg["provider"] == "anthropic"
     assert cfg["api_mode"] == "anthropic_messages"
+    assert cfg["reasoning_config"] == {"effort": "high"}
 
 
 def test_normal_turn_persists_live_route():

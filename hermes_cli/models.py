@@ -1877,7 +1877,10 @@ def _auth_store_identity(path, provider: str) -> str:
         json.dumps({k: e.get(k) for k in _AUTH_IDENTITY_KEYS}, sort_keys=True, default=str)
         for e in pool if isinstance(e, dict))
     state = (data.get("providers") or {}).get(provider)
-    state_keys = sorted(state.keys()) if isinstance(state, dict) else []
+    # Non-secret identity fields only (tokens/expiry rotate on every refresh), so an account or
+    # endpoint switch inside the provider state still invalidates the catalog.
+    state_keys = (sorted(f"{k}={state.get(k)}" if k in _AUTH_IDENTITY_KEYS else k for k in state)
+                  if isinstance(state, dict) else [])
     suppressed = (data.get("suppressed_sources") or {}).get(provider) or []
     return "|".join(rows) + f"#state={state_keys}#suppressed={sorted(map(str, suppressed))}"
 

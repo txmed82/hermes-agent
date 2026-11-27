@@ -437,7 +437,8 @@ def _anthropic_token_or_raise(*, model: str | None = None) -> str:
         reset_at = _anthropic_pool_cooldown_reset(model)
         if reset_at is not None:
             import datetime as _dt
-            when = _dt.datetime.fromtimestamp(reset_at).strftime("%-I:%M %p %Z").strip()
+            # Portable 12-hour clock: "%-I" is glibc/BSD-only and raises on Windows.
+            when = _dt.datetime.fromtimestamp(reset_at).strftime("%I:%M %p %Z").strip().lstrip("0")
             raise AuthError(f"Anthropic subscription usage limit reached (login is valid; no API key is "
                             f"needed); it resets around {when}. Using the fallback model until then.")
         raise AuthError(_NO_ANTHROPIC_CREDENTIALS_MSG)
