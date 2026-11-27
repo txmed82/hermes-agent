@@ -5,16 +5,7 @@ threads died with close code 1009 (message too big) after a gateway restart.
 from __future__ import annotations
 
 import asyncio
-import inspect
 from types import SimpleNamespace
-
-
-def test_connect_owner_default_max_size_is_64_mib():
-    from tui_gateway.owner_forward import connect_owner
-
-    default = inspect.signature(connect_owner).parameters["max_size"].default
-    assert default == 64 * 2 ** 20
-    assert default > 2 ** 20, "websockets' 1 MiB default breaks long session.resume answers"
 
 
 def test_connect_owner_passes_the_large_max_size_to_the_dial(tmp_path, monkeypatch):
