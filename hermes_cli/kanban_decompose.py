@@ -27,7 +27,8 @@ from hermes_cli.kanban_db_graph import decompose_triage_task
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import profiles as profiles_mod
 from hermes_cli.kanban_specify import (
-    _call_aux, _extract_json_blob, _load_triage_task, _task_prompt_fields, _title_body,
+    _automation_gate, _call_aux, _extract_json_blob, _list_triage_ids, _load_triage_task,
+    _task_prompt_fields, _title_body,
 )
 from hermes_cli.kanban_specify import _profile_author as _specify_author
 
@@ -305,13 +306,25 @@ def decompose_task(
     *,
     author: Optional[str] = None,
     timeout: Optional[int] = None,
+    automated: bool = False,
 ) -> DecomposeOutcome:
     """Decompose a triage task into a graph of child tasks. Expected failures
     (not in triage, no aux client, API error, malformed/empty reply) surface
-    as ``ok=False``."""
+    as ``ok=False``.
+
+    ``automated=True`` (the gateway auto-decompose tick, ``--all`` sweeps)
+    applies :func:`kanban_db.triage_automation_policy` before any aux-LLM call:
+    a card escalated by the unblock-loop breaker stays in triage until a human
+    answers it, an answered one is promoted unchanged, and a card with a body
+    and run history is never rewritten. An explicit human ``decompose <id>``
+    passes ``automated=False`` and decomposes any triage card as before."""
     task, reason = _load_triage_task(task_id)
     if task is None:
         return DecomposeOutcome(task_id, False, reason)
+    if automated:
+        handled, reason = _automation_gate(task_id, author or _profile_author())
+        if handled is not None:
+            return DecomposeOutcome(task_id, handled, reason)
 
     routing = _load_routing(root_assignee=task.assignee)
     raw, reason = _call_aux(
@@ -336,8 +349,7 @@ def decompose_task(
     return _apply_fanout(task_id, parsed, routing, audit_author)
 
 
-def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Return task ids currently in the triage column."""
-    with kbc.connect_closing() as conn:
-        rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-    return [row.id for row in rows]
+def list_triage_ids(*, tenant: Optional[str] = None, automated: bool = False) -> list[str]:
+    """Return task ids currently in the triage column. ``automated=True``
+    drops cards held for a human (see :func:`kanban_db.triage_automation_policy`)."""
+    return _list_triage_ids(logger, tenant=tenant, automated=automated)
