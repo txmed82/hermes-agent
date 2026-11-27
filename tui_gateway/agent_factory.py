@@ -193,15 +193,28 @@ def _runtime_model_config(agent, existing: dict | None = None) -> dict:
     attributes DELETE the key rather than skip the write: resume reads provider/endpoint from this JSON
     (model column written separately), so a stale provider would route the resumed chat to the wrong endpoint."""
     config = dict(existing or {})
+    # This live snapshot is newer than any messaging-gateway snapshot it replaces.
+    # Resume prioritizes gateway_runtime, so retaining it would undo a Desktop model pick.
+    config.pop("gateway_runtime", None)
     from agent.voice_turn_route import session_runtime_view
     agent = session_runtime_view(agent)
     attr = lambda k: str(getattr(agent, k, "") or "").strip()
     model, base_url = attr("model"), attr("base_url")
+    raw_provider, requested, api_mode = attr("provider"), attr("requested_provider"), attr("api_mode")
+    primary = getattr(agent, "_primary_runtime", None)
+    if getattr(agent, "_fallback_activated", False) and isinstance(primary, dict) and primary.get("model"):
+        # A fallback is a per-turn detour, not the chat's model: persisting it stranded chats on the
+        # fallback (Opus pick -> next message back on Grok). Store the primary the next turn restores.
+        model = str(primary.get("model") or "").strip()
+        base_url = str(primary.get("base_url") or "").strip()
+        raw_provider = str(primary.get("provider") or "").strip()
+        requested = str(primary.get("requested_provider") or "").strip()
+        api_mode = str(primary.get("api_mode") or "").strip()
     from hermes_cli.runtime_provider_custom import session_provider_identity
-    provider = session_provider_identity(attr("provider"), attr("requested_provider"), base_url, model)
+    provider = session_provider_identity(raw_provider, requested, base_url, model)
     reasoning_config = getattr(agent, "reasoning_config", None)
     live = {
-        "model": model, "provider": provider, "base_url": base_url, "api_mode": attr("api_mode"),
+        "model": model, "provider": provider, "base_url": base_url, "api_mode": api_mode,
         # An empty dict is still a real (present) reasoning config.
         "reasoning_config": reasoning_config if isinstance(reasoning_config, dict) else None,
         "service_tier": getattr(agent, "service_tier", None),

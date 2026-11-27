@@ -106,8 +106,12 @@ def _job_fallback_chain(job: dict, cfg: Any) -> Optional[list]:
     provider and usually a different model, which is exactly what the pin ruled out. Same-provider
     credential-pool rotation is not the chain and still applies. Unpinned jobs inherit the chain.
     """
+    # ``cron.fallback_providers`` (local): an explicit chain for every job, pinned or not, so a
+    # pinned job's provider outage/limit degrades to a backup instead of failing the run.
+    cron_cfg = cfg.get("cron") if isinstance(cfg, dict) else None
+    declared = cron_cfg.get("fallback_providers") if isinstance(cron_cfg, dict) else None
     return scoped_fallback_chain(
-        get_fallback_chain(cfg), None, pinned=_job_route_pinned(job), owner="cron job")
+        get_fallback_chain(cfg), declared, pinned=_job_route_pinned(job), owner="cron job")
 
 
 def _fallback_chain_phrase(job: Optional[dict] = None) -> str:

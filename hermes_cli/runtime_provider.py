@@ -409,6 +409,19 @@ def _anthropic_cfg_base_url(model_cfg: dict[str, Any]) -> str:
     return cfg_base_url if _anthropic_base_url_override_ok(cfg_base_url) else ""
 
 
+def _anthropic_pool_cooldown_reset(model: str | None = None) -> float | None:
+    """Epoch when a rate-limited (not dead) Anthropic pool login becomes usable again, else None."""
+    try:
+        from agent.credential_pool import STATUS_DEAD, load_pool
+        pool = load_pool("anthropic")
+        if not any(e.last_status != STATUS_DEAD for e in pool.entries()):
+            return None
+        return pool.next_available_at(model=model)
+    except Exception:
+        logger.debug("Failed to read Anthropic pool cooldown", exc_info=True)
+        return None
+
+
 def _anthropic_token_or_raise(*, model: str | None = None) -> str:
     from agent.anthropic_credentials import resolve_anthropic_token
     token = resolve_anthropic_token(model=model)
@@ -418,6 +431,15 @@ def _anthropic_token_or_raise(*, model: str | None = None) -> str:
         if model and resolve_anthropic_token():
             raise AuthError(f"Anthropic credentials are rate-limited for {model}; "
                             "other Claude models remain available (see `hermes auth list`).")
+        # Every pooled login benched by a subscription usage limit is still a valid login.
+        # Reporting it as "no credentials / set ANTHROPIC_API_KEY" sends agents and users
+        # chasing an API key that does not exist; name the cooldown and when it lifts.
+        reset_at = _anthropic_pool_cooldown_reset(model)
+        if reset_at is not None:
+            import datetime as _dt
+            when = _dt.datetime.fromtimestamp(reset_at).strftime("%-I:%M %p %Z").strip()
+            raise AuthError(f"Anthropic subscription usage limit reached (login is valid; no API key is "
+                            f"needed); it resets around {when}. Using the fallback model until then.")
         raise AuthError(_NO_ANTHROPIC_CREDENTIALS_MSG)
     return token
 

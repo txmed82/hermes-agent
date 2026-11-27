@@ -6,6 +6,7 @@ Portal's chat/completions ("Model 'gpt-6-luna-900k' isn't available on ChatGPT o
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -45,6 +46,37 @@ def test_resume_honors_gateway_runtime_over_first_call_billing_provider():
     assert (desktop["provider"], desktop["base_url"], desktop["api_mode"]) == ("openai-codex", None, "codex_responses")
     assert stored_session_route(row, current_model="gpt-6-sol", current_provider="anthropic")[1:4] == (
         "openai-codex", None, "codex_responses")
+
+
+@pytest.mark.parametrize("provider,model,base_url,api_mode", [
+    ("openai-codex", "gpt-6.1-sol", "https://chatgpt.com/backend-api/codex", "codex_responses"),
+    ("anthropic", "claude-sonnet-4.6", "https://api.anthropic.com", "anthropic_messages"),
+])
+def test_desktop_switch_replaces_older_gateway_route_on_resume(tmp_path, provider, model, base_url, api_mode):
+    """A later Desktop selection supersedes the gateway route stored before that selection."""
+    from tui_gateway.server import _persist_live_session_runtime
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("s1", source="desktop", model="z-ai/glm-5.3-flash")
+        db.update_session_meta("s1", json.dumps({
+            "provider": "nous", **NOUS_ROUTE,
+            "gateway_runtime": {"provider": "nous", **NOUS_ROUTE, "fallback_active": False},
+            "_branched_from": "parent-session",
+        }))
+        agent = SimpleNamespace(model=model, provider=provider, base_url=base_url,
+                                api_mode=api_mode, reasoning_config=None, service_tier=None, _session_db=db)
+        _persist_live_session_runtime({"agent": agent, "session_key": "s1"})
+        row = db.get_session("s1")
+        assert row is not None
+        assert json.loads(row["model_config"])["_branched_from"] == "parent-session"
+        desktop = _stored_session_runtime_overrides(row)["model_override"]
+        assert (desktop["model"], desktop["provider"], desktop["base_url"], desktop["api_mode"]) == (
+            model, provider, base_url, api_mode)
+        assert stored_session_route(row, current_model="z-ai/glm-5.3-flash", current_provider="nous") == (
+            model, provider, base_url, api_mode, True)
+    finally:
+        db.close()
 
 
 def test_resume_prefers_gateway_runtime_over_stale_top_level_keys():
