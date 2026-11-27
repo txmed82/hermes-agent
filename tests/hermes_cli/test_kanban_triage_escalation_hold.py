@@ -189,6 +189,49 @@ def test_assignee_comment_after_escalation_does_not_release(kanban_home, monkeyp
         assert kb.get_task(conn, tid).status == "triage"
 
 
+def test_worker_comment_does_not_release_a_card_with_no_assignee(kanban_home):
+    """With no assignee on the card, the blocked worker's own profile still must not count as an answer."""
+    with kbc.connect_closing() as conn:
+        tid = _escalated_task(conn)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET assignee = NULL WHERE id = ?", (tid,))
+            conn.execute("UPDATE task_runs SET profile = 'researcher' WHERE task_id = ?", (tid,))
+        kb.add_comment(conn, tid, "researcher", "Blocked again: waiting on the owner.")
+        assert kb.triage_automation_policy(conn, tid)[0] == "hold"
+        kb.add_comment(conn, tid, "colin", "Approved.")
+        assert kb.triage_automation_policy(conn, tid)[0] == "promote"
+
+
+def test_assignee_comment_matches_case_insensitively(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = _escalated_task(conn)
+        kb.add_comment(conn, tid, "Worker", "still blocked")
+        assert kb.triage_automation_policy(conn, tid)[0] == "hold"
+
+
+def test_import_parked_card_is_not_treated_as_escalated(kanban_home):
+    """An import parks dispatchable cards in triage without a ``status`` event; an old escalation
+    in the card's history must not make it look escalated (and unblockable) again."""
+    with kbc.connect_closing() as conn:
+        tid = _escalated_task(conn)
+        assert kb.unblock_task(conn, tid)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'triage' WHERE id = ?", (tid,))
+            kb._append_event(conn, tid, "imported", {"board": "default", "parked": True})
+        action, reason = kb.triage_automation_policy(conn, tid)
+        assert action == "hold"
+        assert "block_loop_detected" not in reason
+        assert kb.unblock_task(conn, tid) is False
+
+
+def test_import_of_an_escalated_card_keeps_the_hold(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = _escalated_task(conn)
+        kb._append_event(conn, tid, "imported", {"board": "default", "parked": False})
+        action, reason = kb.triage_automation_policy(conn, tid)
+        assert action == "hold" and "block_loop_detected" in reason
+
+
 def test_comment_before_escalation_does_not_release(kanban_home):
     with kbc.connect_closing() as conn:
         tid = kb.create_task(conn, title="spend decision", body=ORIGINAL_BODY, assignee="worker")

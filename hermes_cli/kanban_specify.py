@@ -156,7 +156,7 @@ def _automation_gate(task_id: str, author: str) -> tuple[Optional[bool], str]:
 def _list_triage_ids(mod_logger: logging.Logger, *, tenant: Optional[str], automated: bool) -> list[str]:
     """Triage ids, minus the cards unattended automation must leave for a human."""
     with kbc.connect_closing() as conn:
-        tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False)
+        tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False, limit=1000)
         if not automated:
             return [t.id for t in tasks]
         ids = []

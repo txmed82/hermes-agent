@@ -3241,12 +3241,14 @@ def _route_block(
     return "blocked", "blocked", set_sql, (kind, recurrences), payload
 
 
-# Authors of unattended triage automation. Their comments never count as a
-# human answering a ``block_loop_detected`` escalation.
-TRIAGE_AUTOMATION_AUTHORS = frozenset({"auto-decomposer", "auto-specifier"})
+# The gateway's auto-decompose author. Its own audit comments are written
+# without a ``commented`` event today; it is listed so that a future change to
+# that never lets automation answer its own escalation.
+TRIAGE_AUTOMATION_AUTHORS = frozenset({"auto-decomposer"})
 # Every route into ``triage``: created there, escalated by the unblock-loop
-# breaker, or moved there directly (dashboard drag writes a ``status`` event).
-_TRIAGE_ENTRY_EVENTS = ("created", "block_loop_detected", "status")
+# breaker, moved there directly (dashboard drag writes a ``status`` event), or
+# parked by a board import (an ``imported`` event with ``parked`` true).
+_TRIAGE_ENTRY_EVENTS = ("created", "block_loop_detected", "status", "imported")
 
 
 def _triage_escalation_event(conn: sqlite3.Connection, task_id: str) -> Optional[sqlite3.Row]:
@@ -3254,15 +3256,20 @@ def _triage_escalation_event(conn: sqlite3.Connection, task_id: str) -> Optional
 
     Only meaningful while the card sits in ``triage``: the newest entry event
     names how it got there, so an escalation followed by a human move out and
-    a later manual re-triage is not treated as still escalated.
+    a later manual re-triage or import park is not treated as still escalated.
+    An ``imported`` event that did not park the card is not an entry: an
+    escalated card carried across an import stays escalated.
     """
     placeholders = ", ".join("?" for _ in _TRIAGE_ENTRY_EVENTS)
-    row = conn.execute(
+    for row in conn.execute(
         f"SELECT id, kind, payload FROM task_events WHERE task_id = ? "
-        f"AND kind IN ({placeholders}) ORDER BY id DESC LIMIT 1",
+        f"AND kind IN ({placeholders}) ORDER BY id DESC",
         (task_id, *_TRIAGE_ENTRY_EVENTS),
-    ).fetchone()
-    return row if row is not None and row["kind"] == "block_loop_detected" else None
+    ):
+        if row["kind"] == "imported" and not _json_dict(row["payload"]).get("parked"):
+            continue
+        return row if row["kind"] == "block_loop_detected" else None
+    return None
 
 
 def _escalation_answer_author(
@@ -3271,19 +3278,29 @@ def _escalation_answer_author(
     """Author of the first comment that answers an escalation, or None.
 
     A comment counts when it was written after the escalation event and its
-    author is neither the card's assignee (the blocked worker can comment after
-    blocking) nor triage automation. Ordering uses event ids, which are exact,
-    rather than second-resolution timestamps.
+    author is none of: the card's assignee, a profile that ran the card (the
+    blocked worker can comment after blocking, and a card claimed without an
+    assignee has only its run profile to name that worker), or triage
+    automation. Names compare in canonical (lowercased) form, as assignees are
+    stored. Ordering uses event ids, which are exact, rather than
+    second-resolution timestamps.
     """
-    ignored = set(TRIAGE_AUTOMATION_AUTHORS)
-    if assignee:
-        ignored.add(assignee.strip())
+    def canon(name: object) -> str:
+        text = str(name or "").strip()
+        return (_canonical_assignee(text) or "") if text else ""
+
+    ignored = {canon(a) for a in TRIAGE_AUTOMATION_AUTHORS}
+    ignored.add(canon(assignee))
+    ignored.update(canon(r["profile"]) for r in conn.execute(
+        "SELECT DISTINCT profile FROM task_runs WHERE task_id = ?", (task_id,),
+    ))
+    ignored.discard("")
     for row in conn.execute(
         "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'commented' "
         "AND id > ? ORDER BY id ASC", (task_id, int(after_event_id)),
     ):
         author = str(_json_dict(row["payload"]).get("author") or "").strip()
-        if author and author not in ignored:
+        if author and canon(author) not in ignored:
             return author
     return None
 
@@ -3301,8 +3318,8 @@ def triage_automation_policy(conn: sqlite3.Connection, task_id: str) -> tuple[st
     * ``"hold"``: leave it in triage for a human; ``reason`` says why.
 
     A card the unblock-loop breaker escalated (``block_loop_detected``) is held
-    until a human answers it: a comment from someone other than the assignee,
-    or an :func:`unblock_task`. Re-promoting it unattended respawns a worker
+    until a human answers it: a comment from someone other than the assignee or
+    a profile that ran the card, or an :func:`unblock_task`. Re-promoting it unattended respawns a worker
     that can only block again, so the escalation would never reach a human.
     A card that already carries a body and a run history is never rewritten
     by automation either.
