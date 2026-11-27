@@ -1260,7 +1260,9 @@ def _run_triage_sweep(args: argparse.Namespace, verb: str, mod, run_one, json_ke
     if args.task_id and all_flag:
         return _err("kanban: pass either a task id OR --all, not both", 2)
     if all_flag:
-        ids = mod.list_triage_ids(tenant=tenant)
+        # A sweep is unattended: it skips cards escalated for a human and never
+        # rewrites a worked card (kanban_db.triage_automation_policy).
+        ids = mod.list_triage_ids(tenant=tenant, automated=True)
         if not ids:
             if want_json:
                 print(json.dumps({json_key: 0, "total": 0}))
@@ -1274,7 +1276,7 @@ def _run_triage_sweep(args: argparse.Namespace, verb: str, mod, run_one, json_ke
 
     ok_count = 0
     for tid in ids:
-        outcome = run_one(tid, author=author)
+        outcome = run_one(tid, author=author, automated=all_flag)
         if outcome.ok:
             ok_count += 1
         if want_json:

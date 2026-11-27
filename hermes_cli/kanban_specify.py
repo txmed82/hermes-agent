@@ -134,6 +134,41 @@ def _load_triage_task(task_id: str) -> tuple[Optional[kb.Task], str]:
     return task, ""
 
 
+def _automation_gate(task_id: str, author: str) -> tuple[Optional[bool], str]:
+    """Apply :func:`kanban_db.triage_automation_policy` for an unattended caller.
+
+    ``(None, "")`` means go ahead with the aux LLM. Otherwise the card was
+    handled here without one: ``(False, reason)`` when it is held for a human,
+    ``(True, reason)`` when a human answer released it and it was promoted
+    unchanged, ``(False, ...)`` again if it left triage before the promotion.
+    """
+    with kbc.connect_closing() as conn:
+        action, reason = kb.triage_automation_policy(conn, task_id)
+        if action == "specify":
+            return None, ""
+        if action == "hold":
+            return False, reason
+        if not kb.specify_triage_task(conn, task_id, author=author):
+            return False, "task moved out of triage before promotion"
+    return True, f"promoted unchanged: {reason}"
+
+
+def _list_triage_ids(mod_logger: logging.Logger, *, tenant: Optional[str], automated: bool) -> list[str]:
+    """Triage ids, minus the cards unattended automation must leave for a human."""
+    with kbc.connect_closing() as conn:
+        tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False, limit=1000)
+        if not automated:
+            return [t.id for t in tasks]
+        ids = []
+        for t in tasks:
+            action, reason = kb.triage_automation_policy(conn, t.id)
+            if action == "hold":
+                mod_logger.debug("kanban triage: %s held for a human: %s", t.id, reason)
+                continue
+            ids.append(t.id)
+    return ids
+
+
 def _task_prompt_fields(task: kb.Task) -> dict[str, str]:
     """Bounded ``task_id``/``title``/``body`` for the user prompt templates."""
     return {
@@ -192,13 +227,22 @@ def specify_task(
     *,
     author: Optional[str] = None,
     timeout: Optional[int] = None,
+    automated: bool = False,
 ) -> SpecifyOutcome:
     """Specify one triage task and promote it to ``todo``. Expected failures
     (not in triage, no aux client, API error, malformed reply) surface as
-    ``ok=False`` so an ``--all`` sweep continues."""
+    ``ok=False`` so an ``--all`` sweep continues.
+
+    ``automated=True`` (``--all`` sweeps) applies
+    :func:`kanban_db.triage_automation_policy` first: cards waiting for a human
+    are skipped and answered escalations are promoted unchanged."""
     task, reason = _load_triage_task(task_id)
     if task is None:
         return SpecifyOutcome(task_id, False, reason)
+    if automated:
+        handled, reason = _automation_gate(task_id, author or _profile_author())
+        if handled is not None:
+            return SpecifyOutcome(task_id, handled, reason)
 
     raw, reason = _call_aux(
         "specify", task_id, aux_task="triage_specifier", system=_SYSTEM_PROMPT,
@@ -234,8 +278,8 @@ def specify_task(
     return SpecifyOutcome(task_id, True, "specified", new_title=new_title)
 
 
-def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
-    """Task ids in the triage column; ``tenant`` narrows the sweep."""
-    with kbc.connect_closing() as conn:
-        tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False)
-    return [t.id for t in tasks]
+def list_triage_ids(*, tenant: Optional[str] = None, automated: bool = False) -> list[str]:
+    """Task ids in the triage column; ``tenant`` narrows the sweep.
+    ``automated=True`` drops cards held for a human (see
+    :func:`kanban_db.triage_automation_policy`)."""
+    return _list_triage_ids(logger, tenant=tenant, automated=automated)

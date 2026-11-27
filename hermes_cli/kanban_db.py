@@ -3241,6 +3241,114 @@ def _route_block(
     return "blocked", "blocked", set_sql, (kind, recurrences), payload
 
 
+# The gateway's auto-decompose author. Its own audit comments are written
+# without a ``commented`` event today; it is listed so that a future change to
+# that never lets automation answer its own escalation.
+TRIAGE_AUTOMATION_AUTHORS = frozenset({"auto-decomposer"})
+# Every route into ``triage``: created there, escalated by the unblock-loop
+# breaker, moved there directly (dashboard drag writes a ``status`` event), or
+# parked by a board import (an ``imported`` event with ``parked`` true).
+_TRIAGE_ENTRY_EVENTS = ("created", "block_loop_detected", "status", "imported")
+
+
+def _triage_escalation_event(conn: sqlite3.Connection, task_id: str) -> Optional[sqlite3.Row]:
+    """The ``block_loop_detected`` event that put this card in triage, or None.
+
+    Only meaningful while the card sits in ``triage``: the newest entry event
+    names how it got there, so an escalation followed by a human move out and
+    a later manual re-triage or import park is not treated as still escalated.
+    An ``imported`` event that did not park the card is not an entry: an
+    escalated card carried across an import stays escalated.
+    """
+    placeholders = ", ".join("?" for _ in _TRIAGE_ENTRY_EVENTS)
+    for row in conn.execute(
+        f"SELECT id, kind, payload FROM task_events WHERE task_id = ? "
+        f"AND kind IN ({placeholders}) ORDER BY id DESC",
+        (task_id, *_TRIAGE_ENTRY_EVENTS),
+    ):
+        if row["kind"] == "imported" and not _json_dict(row["payload"]).get("parked"):
+            continue
+        return row if row["kind"] == "block_loop_detected" else None
+    return None
+
+
+def _escalation_answer_author(
+    conn: sqlite3.Connection, task_id: str, after_event_id: int, assignee: Optional[str],
+) -> Optional[str]:
+    """Author of the first comment that answers an escalation, or None.
+
+    A comment counts when it was written after the escalation event and its
+    author is none of: the card's assignee, a profile that ran the card (the
+    blocked worker can comment after blocking, and a card claimed without an
+    assignee has only its run profile to name that worker), or triage
+    automation. Names compare in canonical (lowercased) form, as assignees are
+    stored. Ordering uses event ids, which are exact, rather than
+    second-resolution timestamps.
+    """
+    def canon(name: object) -> str:
+        text = str(name or "").strip()
+        return (_canonical_assignee(text) or "") if text else ""
+
+    ignored = {canon(a) for a in TRIAGE_AUTOMATION_AUTHORS}
+    ignored.add(canon(assignee))
+    ignored.update(canon(r["profile"]) for r in conn.execute(
+        "SELECT DISTINCT profile FROM task_runs WHERE task_id = ?", (task_id,),
+    ))
+    ignored.discard("")
+    for row in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'commented' "
+        "AND id > ? ORDER BY id ASC", (task_id, int(after_event_id)),
+    ):
+        author = str(_json_dict(row["payload"]).get("author") or "").strip()
+        if author and canon(author) not in ignored:
+            return author
+    return None
+
+
+def triage_automation_policy(conn: sqlite3.Connection, task_id: str) -> tuple[str, str]:
+    """``(action, reason)`` for unattended triage automation on one card.
+
+    Unattended means the gateway auto-decompose tick and ``--all`` sweeps; an
+    explicit ``decompose``/``specify`` of one card by a human is a decision
+    about that card and does not consult this. ``action`` is one of:
+
+    * ``"specify"``: a fresh triage card; let the aux LLM specify/decompose it.
+    * ``"promote"``: a human answered the escalation; promote it unchanged, with
+      no aux-LLM call and no rewrite, so the next worker reads the answer.
+    * ``"hold"``: leave it in triage for a human; ``reason`` says why.
+
+    A card the unblock-loop breaker escalated (``block_loop_detected``) is held
+    until a human answers it: a comment from someone other than the assignee or
+    a profile that ran the card, or an :func:`unblock_task`. Re-promoting it unattended respawns a worker
+    that can only block again, so the escalation would never reach a human.
+    A card that already carries a body and a run history is never rewritten
+    by automation either.
+    """
+    row = conn.execute(
+        "SELECT status, assignee, body FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    if row is None:
+        return "hold", "unknown task id"
+    if row["status"] != "triage":
+        return "hold", f"task is not in triage (status={row['status']!r})"
+    escalation = _triage_escalation_event(conn, task_id)
+    if escalation is not None:
+        answered_by = _escalation_answer_author(conn, task_id, escalation["id"], row["assignee"])
+        if answered_by is None:
+            kind = _json_dict(escalation["payload"]).get("kind") or "untyped"
+            return "hold", (
+                f"escalated to triage by the unblock-loop breaker (block_loop_detected, "
+                f"kind={kind}); waiting for a human comment or unblock"
+            )
+        return "promote", f"comment by {answered_by} answered the escalation"
+    has_runs = conn.execute(
+        "SELECT 1 FROM task_runs WHERE task_id = ? LIMIT 1", (task_id,),
+    ).fetchone() is not None
+    if has_runs and (row["body"] or "").strip():
+        return "hold", "card already has a body and run history; left for a human to re-specify"
+    return "specify", ""
+
+
 def redact_review_value(value: Any) -> Any:
     """Redact secrets at the domain boundary for durable review handoffs."""
     if isinstance(value, str):
@@ -3556,16 +3664,24 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
 
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
+    when that is where it left off), closing any leaked run first.
+
+    A ``triage`` card the unblock-loop breaker escalated (``block_loop_detected``)
+    is unblockable too: that is the human answer the escalation waits for (see
+    :func:`triage_automation_policy`). Any other triage card is refused; it
+    needs specifying, not unblocking."""
     now = int(time.time())
     with write_txn(conn):
+        status = _task_status(conn, task_id)
+        escalated = status == "triage" and _triage_escalation_event(conn, task_id) is not None
+        unblockable = ("blocked", "scheduled", "triage") if escalated else ("blocked", "scheduled")
         resume_status = (
             _resume_status_from_events(conn, task_id)
-            if _task_status(conn, task_id) == "blocked"
+            if status == "blocked" or escalated
             else "ready"
         )
         _reclaim_dangling_run(
-            conn, task_id, statuses=("blocked", "scheduled"), now=now,
+            conn, task_id, statuses=unblockable, now=now,
             note="invariant recovery on unblock",
         )
         # Re-gate on parent completion before restoring the source phase.
@@ -3580,10 +3696,11 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         # unbounded; only complete_task clears them. ``consecutive_failures``
         # (the dispatcher's spawn/crash counter) IS reset — a deliberate unblock
         # is a fresh start for the retry budget.
+        placeholders = ", ".join("?" for _ in unblockable)
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
             "consecutive_failures = 0, last_failure_error = NULL "
-            "WHERE id = ? AND status IN ('blocked', 'scheduled')", (new_status, task_id),
+            f"WHERE id = ? AND status IN ({placeholders})", (new_status, task_id, *unblockable),
         )
         if cur.rowcount != 1:
             return False
