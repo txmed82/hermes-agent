@@ -1859,6 +1859,32 @@ def _provider_models_cache_path() -> Path:
     return get_hermes_home() / "provider_models_cache.json"
 
 
+_AUTH_IDENTITY_KEYS = ("id", "label", "source", "auth_type", "base_url", "account_id", "email", "sub")
+
+
+def _auth_store_identity(path, provider: str) -> str:
+    """Token- and status-free identity of *provider*'s credentials in auth.json (see caller)."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return "missing"
+    except Exception:
+        return "unreadable"
+    if not isinstance(data, dict):
+        return "invalid"
+    pool = (data.get("credential_pool") or {}).get(provider) or []
+    rows = sorted(
+        json.dumps({k: e.get(k) for k in _AUTH_IDENTITY_KEYS}, sort_keys=True, default=str)
+        for e in pool if isinstance(e, dict))
+    state = (data.get("providers") or {}).get(provider)
+    # Non-secret identity fields only (tokens/expiry rotate on every refresh), so an account or
+    # endpoint switch inside the provider state still invalidates the catalog.
+    state_keys = (sorted(f"{k}={state.get(k)}" if k in _AUTH_IDENTITY_KEYS else k for k in state)
+                  if isinstance(state, dict) else [])
+    suppressed = (data.get("suppressed_sources") or {}).get(provider) or []
+    return "|".join(rows) + f"#state={state_keys}#suppressed={sorted(map(str, suppressed))}"
+
+
 def _credential_fingerprint(provider: str) -> str:
     """Short hash of the credentials ``provider_model_ids(provider)`` would see right now.
 
@@ -1941,8 +1967,13 @@ def _credential_fingerprint(provider: str) -> str:
     else:
         try:
             from hermes_constants import get_hermes_home
-            for rel in ("auth.json", "credentials.json"):
-                _mtime_part(rel, get_hermes_home() / rel)
+            # auth.json by credential IDENTITY, not file digest: it is rewritten on every token
+            # refresh and every pool status/cooldown mark of ANY provider (429/402 benches, OAuth
+            # refresh). A whole-file digest flapped every provider's catalog key, so non-blocking
+            # pickers served the curated fallback (e.g. Antigravity lost Gemini 4) most of the day.
+            # An account add/remove/switch still changes the identity and invalidates the entry.
+            parts.append(f"auth.json@{_auth_store_identity(get_hermes_home() / 'auth.json', provider)}")
+            _mtime_part("credentials.json", get_hermes_home() / "credentials.json")
         except Exception:
             pass
         from providers import list_providers

@@ -340,13 +340,24 @@ class GatewayTurnPrepareMixin:
         if not model:
             return
         from hermes_cli.runtime_provider_custom import session_provider_identity
-        runtime = {
-            "provider": session_provider_identity(getattr(agent, "provider", None),
-                                                  getattr(agent, "requested_provider", None),
-                                                  getattr(agent, "base_url", None), model),
-            "base_url": getattr(agent, "base_url", None),
-            "api_mode": getattr(agent, "api_mode", None),
-        }
+        primary = getattr(agent, "_primary_runtime", None)
+        if getattr(agent, "_fallback_activated", False) and isinstance(primary, dict) and primary.get("model"):
+            # A fallback is a per-turn detour; persisting it stranded the chat on the fallback model.
+            model = primary["model"]
+            runtime = {
+                "provider": session_provider_identity(primary.get("provider"), primary.get("requested_provider"),
+                                                      primary.get("base_url"), model),
+                "base_url": primary.get("base_url"),
+                "api_mode": primary.get("api_mode"),
+            }
+        else:
+            runtime = {
+                "provider": session_provider_identity(getattr(agent, "provider", None),
+                                                      getattr(agent, "requested_provider", None),
+                                                      getattr(agent, "base_url", None), model),
+                "base_url": getattr(agent, "base_url", None),
+                "api_mode": getattr(agent, "api_mode", None),
+            }
         runtime["fallback_active"] = bool(getattr(agent, "_fallback_activated", False))
         runtime = {k: v for k, v in runtime.items() if v not in (None, "")}
         try:
