@@ -36,7 +36,7 @@ def profile_home(tmp_path, monkeypatch):
         {"version": 1, "providers": {}, "credential_pool": {"xai-oauth": [dict(row)]}}))
 
     import hermes_constants
-    hermes_constants._default_hermes_root_memo = None  # type: ignore[attr-defined]
+    monkeypatch.setattr(hermes_constants, "_default_hermes_root_memo", None, raising=False)
     monkeypatch.setenv("HERMES_HOME", str(profile))
     return root, profile
 
@@ -94,7 +94,7 @@ def test_root_lock_helper_is_nullcontext_in_classic_mode(profile_home, monkeypat
     root = profile_home[0]
     monkeypatch.setenv("HERMES_HOME", str(root))
     import hermes_constants
-    hermes_constants._default_hermes_root_memo = None  # type: ignore[attr-defined]
+    monkeypatch.setattr(hermes_constants, "_default_hermes_root_memo", None, raising=False)
     pool = CredentialPool("xai-oauth", [])
     ctx = pool._root_store_lock_if_borrowing()
     assert isinstance(ctx, contextlib.nullcontext)
