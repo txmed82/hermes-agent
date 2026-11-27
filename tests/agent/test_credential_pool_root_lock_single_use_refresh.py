@@ -86,7 +86,7 @@ def test_profile_single_use_refresh_also_holds_root_lock(profile_home, monkeypat
         i for i, p in enumerate(target_paths) if p and p.endswith("hermes-root/auth.json"))
 
 
-def test_root_lock_helper_is_nullcontext_in_classic_mode(profile_home, monkeypatch, tmp_path):
+def test_root_lock_helper_is_nullcontext_in_classic_mode(profile_home, monkeypatch):
     from agent.credential_pool import CredentialPool
     import contextlib
 

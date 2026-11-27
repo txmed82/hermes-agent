@@ -1533,7 +1533,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             return self._refresh_entry_impl(synced, force=force)
 
     def _root_store_lock_if_borrowing(self):
-        """local: also hold the GLOBAL-ROOT auth.json lock during a single-use refresh in a profile.
+        """Also hold the GLOBAL-ROOT auth.json lock during a single-use refresh in a profile.
 
         Profiles borrow root's single-use OAuth grant (Codex/xAI/Nous), but ``_auth_store_lock()``
         only locks the profile's own auth.json. The default profile (root lock) and a named profile
